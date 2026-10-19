@@ -1,0 +1,909 @@
+<!doctype html>
+<html lang="pt-PT"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1b2620">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Poços">
+<title>Poços de biogás — campo</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Condensed:wght@600;700&display=swap" rel="stylesheet">
+<!--
+  Aplicação de campo dos poços de biogás.
+
+  Uma página só, sem servidor: corre no telemóvel do operador, que no aterro
+  tem dados móveis mas nunca chega à rede da empresa. Os aterros entram por
+  um "pacote de campo" (JSON) descarregado no EGF Lab; o que se grava sai em
+  Excel e volta ao EGF Lab pela importação normal.
+
+  Dois modos sobre a mesma escolha de poço:
+    Leituras  -- CH4, CO2, O2, H2S, estado e nota por poço, numa campanha
+                 (aterro + data). O Excel tem as colunas de READING_COLUMNS,
+                 que a importação de leituras do EGF Lab reconhece sem mapear.
+                 O teste tests/test_field_app_export.py lê essa linha daqui.
+    Posições  -- o que a primeira versão fazia: GPS com média, ou à mão no
+                 mapa, para corrigir as coordenadas dos poços.
+
+  Tudo fica no IndexedDB do telemóvel até o operador apagar. O sw.js guarda a
+  aplicação para abrir sem rede.
+-->
+<style>
+:root{--bg:#e9eeea;--card:#ffffff;--ink:#0f1f17;--muted:#56665c;--line:#cdd7cf;--hivis:#f39200;--hivis-ink:#1a1000;--good:#1f8a4c;--warn:#b86e00;--bad:#c4332b;--chip:#eef3ef}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#111a15;--card:#1b2620;--ink:#e8efe9;--muted:#9fb0a5;--line:#2f3d35;--hivis:#ffa31a;--good:#4cc581;--warn:#f0a53a;--bad:#ff6b61;--chip:#24322a}}
+:root[data-theme="dark"]{--bg:#111a15;--card:#1b2620;--ink:#e8efe9;--muted:#9fb0a5;--line:#2f3d35;--hivis:#ffa31a;--good:#4cc581;--warn:#f0a53a;--bad:#ff6b61;--chip:#24322a}
+*,*:before,*:after{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font-family:Barlow,"Segoe UI",Roboto,system-ui,sans-serif;font-size:16px;line-height:1.4;padding-bottom:env(safe-area-inset-bottom,0px)}
+[hidden]{display:none!important}
+#mapwrap{position:sticky;top:0;z-index:5;height:46vh;min-height:260px;background:#0f1612}
+/* Nas leituras o mapa serve para dar com o poço, não para apontar: mais
+   baixo e não fixo, para o teclado e o formulário terem o ecrã. */
+body.m-leituras #mapwrap{position:relative;height:34vh;min-height:220px}
+#map{position:absolute;inset:0}
+.topbar{position:absolute;z-index:1000;left:0;right:0;top:0;padding:calc(env(safe-area-inset-top,0px) + 8px) 10px 8px;display:flex;justify-content:space-between;align-items:flex-start;gap:8px;pointer-events:none}
+.pill{pointer-events:auto;background:rgba(15,31,23,.88);color:#fff;border-radius:999px;padding:6px 12px;font-size:14px;font-weight:600;display:flex;align-items:center;gap:6px}
+.pill .a{font-family:"Barlow Condensed","Arial Narrow",sans-serif;font-size:20px}
+.a.good{color:#5fe39a}.a.warn{color:#ffbf47}.a.bad{color:#ff7d74}.a.none{color:#bbb}
+.mapbtns{position:absolute;z-index:1000;right:10px;bottom:12px;display:flex;flex-direction:column;gap:8px}
+.mbtn{pointer-events:auto;background:#fff;color:#0f1f17;border:none;border-radius:8px;padding:9px 12px;font:600 14px Barlow,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.4);cursor:pointer}
+.mbtn[aria-pressed="true"]{background:var(--hivis);color:var(--hivis-ink)}
+#cross{position:absolute;z-index:999;left:50%;top:50%;width:44px;height:44px;margin:-22px 0 0 -22px;pointer-events:none;display:none}
+#cross:before,#cross:after{content:"";position:absolute;background:#ff2d2d;box-shadow:0 0 0 1px #fff}
+#cross:before{left:21px;top:0;width:2px;height:44px}#cross:after{top:21px;left:0;height:2px;width:44px}
+body.picking #cross{display:block}
+main{max-width:560px;margin:0 auto;padding:12px 12px 40px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:12px}
+.instrow{display:flex;gap:10px;align-items:center;margin:0 2px 10px}
+.instrow select{flex:1;min-width:0;font:700 19px "Barlow Condensed","Arial Narrow",sans-serif;padding:7px 8px;border:1.5px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
+.progress{font-size:14px;color:var(--muted);white-space:nowrap}.progress b{color:var(--ink);font-size:18px}
+.tabs{display:grid;grid-template-columns:1fr 1fr;gap:4px;background:var(--chip);border:1px solid var(--line);border-radius:10px;padding:4px;margin-bottom:12px}
+.tab{border:none;background:none;color:var(--ink);font:600 16px Barlow,sans-serif;padding:10px;border-radius:7px;cursor:pointer}
+.tab[aria-pressed="true"]{background:var(--ink);color:var(--card)}
+label.lbl{display:block;font-weight:600;font-size:14px;margin-bottom:6px}
+.camprow{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px}
+.camprow input{font:600 16px Barlow,sans-serif;padding:7px 10px;border:1.5px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
+.idrow{display:grid;grid-template-columns:56px 1fr 56px;gap:8px}
+.idrow input{font-family:"Barlow Condensed","Arial Narrow",sans-serif;font-size:38px;font-weight:700;text-align:center;width:100%;min-width:0;padding:2px;border:2px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
+.idrow input:focus{border-color:var(--hivis);outline:none}
+.step{font-size:30px;font-weight:600;border:2px solid var(--line);background:var(--chip);color:var(--ink);border-radius:8px;cursor:pointer}
+.wellinfo{margin-top:8px;font-size:14px;color:var(--muted);min-height:1.4em}.wellinfo.dup{color:var(--warn);font-weight:600}
+.last{font-size:13.5px;color:var(--muted);margin-top:2px}
+.linkbtn{background:none;border:none;color:var(--hivis);font:700 14px Barlow,sans-serif;padding:0 0 0 4px;cursor:pointer;text-decoration:underline}
+.meas{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+.meas label{display:flex;flex-direction:column;gap:4px;font-weight:600;font-size:15px}
+.meas label .u{font-weight:400;color:var(--muted);font-size:13px}
+.meas input{font:700 30px "Barlow Condensed","Arial Narrow",sans-serif;text-align:center;width:100%;min-width:0;padding:5px 4px;border:2px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
+.meas input:focus{border-color:var(--hivis);outline:none}
+.meas input.bad{border-color:var(--bad);color:var(--bad)}
+.checks{margin-top:10px;font-size:14px;display:flex;flex-direction:column;gap:5px;align-items:flex-start}
+.checks:empty{display:none}
+.bal{font-weight:600;padding:4px 10px;border-radius:999px;background:var(--chip);border:1.5px solid currentColor}
+.bal.good{color:var(--good)}.bal.warn{color:var(--warn)}.bal.bad{color:var(--bad)}.bal.none{color:var(--muted)}
+.warnline{color:var(--warn);font-weight:600}.warnline.hard{color:var(--bad)}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 8px}
+.chip{border:1.5px solid var(--line);background:var(--chip);color:var(--ink);border-radius:999px;padding:7px 14px;font:500 15px Barlow,sans-serif;cursor:pointer}
+.chip[aria-pressed="true"]{background:var(--ink);color:var(--card);border-color:var(--ink)}
+input.text{width:100%;font:16px Barlow,sans-serif;padding:10px 12px;border:1.5px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
+.record{display:block;width:100%;margin-top:14px;padding:17px 12px;font:700 22px "Barlow Condensed","Arial Narrow",sans-serif;background:var(--hivis);color:var(--hivis-ink);border:none;border-radius:10px;cursor:pointer;position:relative;overflow:hidden}
+.record:disabled{opacity:.45;cursor:not-allowed}
+.record .bar{position:absolute;left:0;top:0;bottom:0;background:rgba(0,0,0,.18);width:0}.record span{position:relative}
+.opt{display:flex;gap:8px;align-items:center;font-size:14px;color:var(--muted);margin-top:10px}
+.opt input{accent-color:var(--hivis);width:18px;height:18px;flex:none}
+.hint{font-size:13.5px;color:var(--muted);margin:8px 0 0}
+.btn{border:1.5px solid var(--line);background:var(--chip);color:var(--ink);border-radius:8px;padding:9px 14px;font:600 15px Barlow,sans-serif;cursor:pointer}
+.btn.primary{background:var(--ink);color:var(--card);border-color:var(--ink)}
+.btn.danger{color:var(--bad)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+h2{font-size:16px;margin:0 0 8px;display:flex;justify-content:space-between;align-items:baseline;gap:8px}h2 small{font-weight:400;font-size:13px;color:var(--muted)}
+ul.list{list-style:none;margin:0;padding:0}
+ul.list li{display:grid;grid-template-columns:52px 1fr auto;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
+ul.list li:first-child{border-top:0}
+.lid{font:700 24px "Barlow Condensed","Arial Narrow",sans-serif;text-align:center;cursor:pointer;background:none;border:none;color:var(--ink);padding:0}
+.lmeta{font-size:13.5px;color:var(--muted);line-height:1.3;min-width:0}.lmeta b{color:var(--ink);font-weight:600}
+.lmeta .st{color:var(--bad);font-weight:600}
+.del{background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;padding:4px 8px}
+.empty{color:var(--muted);font-size:14px;margin:4px 0}
+.exportrow{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.missing{display:flex;flex-wrap:wrap;gap:6px}
+.mcode{min-width:40px;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--chip);color:var(--ink);font:600 15px "Barlow Condensed","Arial Narrow",sans-serif;cursor:pointer}
+.missnone{color:var(--muted);font-size:14px}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(18px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--card);padding:10px 16px;border-radius:8px;font-weight:600;font-size:15px;opacity:0;transition:opacity .2s;pointer-events:none;max-width:90vw;z-index:2000}
+.toast.show{opacity:1}
+.banner{background:#fff3d6;color:#4a3000;border:1px solid #f0c66b;border-radius:8px;padding:10px 12px;font-size:14px;margin-bottom:12px}
+.banner .linkbtn{color:#7a4a00}
+.setup p{margin:0 0 12px;font-size:15px}
+.ver{font-size:12px;color:var(--muted);margin-top:10px}
+.lbl-rec,.lbl-old{background:none;border:none;box-shadow:none;padding:0;font:700 12px Barlow,sans-serif;text-shadow:0 0 3px #000,0 0 3px #000}
+.lbl-rec{color:#ffd08a}.lbl-old{color:#e6e6e6;font-weight:600;font-size:11px}
+.lbl-rec:before,.lbl-old:before{display:none}
+:focus-visible{outline:3px solid var(--hivis);outline-offset:2px}
+</style></head><body class="m-leituras">
+<div id="mapwrap">
+  <div id="map"></div><div id="cross"></div>
+  <div class="topbar"><div class="pill">GPS <span class="a none" id="accPill">—</span></div><div class="pill" id="statusPill">A iniciar…</div></div>
+  <div class="mapbtns">
+    <button class="mbtn" id="followBtn" aria-pressed="true">Seguir-me</button>
+    <button class="mbtn" id="wellsBtn" aria-pressed="true">Poços</button>
+    <button class="mbtn" id="pickBtn" aria-pressed="false" hidden>Escolher no mapa</button>
+  </div>
+</div>
+<main>
+<div class="banner" id="gpsBanner" hidden></div>
+<div class="banner" id="iosHint" hidden>
+  No iPhone, use <b>Partilhar → Adicionar ao ecrã principal</b> e abra a aplicação pelo ícone.
+  Aberta só no Safari, o iPhone pode apagar o que ficou gravado ao fim de 7 dias sem uso.
+  <button class="linkbtn" id="iosHintClose">Percebi</button>
+</div>
+
+<section class="card setup" id="setup" hidden>
+  <h2>Comece por carregar um aterro</h2>
+  <p>Peça ao escritório o <b>pacote de campo</b> do aterro: um ficheiro <b>.json</b> que se
+     descarrega no EGF Lab, em Biogás › Poços ou no Mapa. Guarde-o no telemóvel e carregue-o aqui.
+     Só é preciso uma vez por aterro.</p>
+  <button class="btn primary" data-load>Carregar pacote</button>
+  <p class="ver" id="verSetup"></p>
+</section>
+
+<div id="work" hidden>
+  <div class="instrow">
+    <select id="instSel" aria-label="Aterro"></select>
+    <div class="progress"><b id="nDone">0</b> de <span id="nTotal">0</span></div>
+  </div>
+  <div class="tabs" role="group" aria-label="Modo">
+    <button class="tab" id="tabRead" aria-pressed="true">Leituras</button>
+    <button class="tab" id="tabPos" aria-pressed="false">Posições</button>
+  </div>
+
+  <section class="card">
+    <div class="camprow" id="campRow">
+      <label class="lbl" for="campDate" style="margin:0">Data da campanha</label>
+      <input type="date" id="campDate">
+    </div>
+    <label class="lbl" for="wid">Poço</label>
+    <div class="idrow">
+      <button class="step" id="dec" aria-label="Poço anterior">−</button>
+      <input id="wid" type="text" inputmode="numeric" autocomplete="off" enterkeyhint="next">
+      <button class="step" id="inc" aria-label="Poço seguinte">+</button>
+    </div>
+    <div class="wellinfo" id="wellInfo"></div>
+
+    <div id="readForm">
+      <div class="last" id="lastInfo"></div>
+      <div class="meas">
+        <label><span>CH₄ <span class="u">% vol</span></span><input id="ch4" type="text" inputmode="decimal" autocomplete="off" enterkeyhint="next"></label>
+        <label><span>CO₂ <span class="u">% vol</span></span><input id="co2" type="text" inputmode="decimal" autocomplete="off" enterkeyhint="next"></label>
+        <label><span>O₂ <span class="u">% vol</span></span><input id="o2" type="text" inputmode="decimal" autocomplete="off" enterkeyhint="next"></label>
+        <label><span>H₂S <span class="u">ppm</span></span><input id="h2s" type="text" inputmode="decimal" autocomplete="off" enterkeyhint="done"></label>
+      </div>
+      <div class="checks" id="checks" aria-live="polite"></div>
+      <div class="chips" id="statusChips" role="group" aria-label="Estado"></div>
+      <input class="text" id="rNote" placeholder="Nota (opcional)">
+      <button class="record" id="saveReading"><span id="saveLabel">Gravar</span></button>
+    </div>
+
+    <div id="posForm" hidden>
+      <div class="chips" id="posChips">
+        <button class="chip" aria-pressed="false" data-note="Danificado">Danificado</button>
+        <button class="chip" aria-pressed="false" data-note="Não encontrado">Não encontrado</button>
+        <button class="chip" aria-pressed="false" data-note="Tapado">Tapado</button>
+        <button class="chip" aria-pressed="false" data-note="Poço novo">Poço novo</button>
+      </div>
+      <input class="text" id="note" placeholder="Nota (opcional)">
+      <button class="record" id="recBtn" disabled><div class="bar" id="recBar"></div><span id="recLabel">À espera do GPS…</span></button>
+      <label class="opt" id="avgRow"><input type="checkbox" id="avg" checked> Média do GPS durante 10 segundos (fique parado em cima do poço)</label>
+      <p class="hint" id="pickHint" hidden>Mova o mapa até a cruz vermelha ficar em cima do poço e carregue no botão laranja.</p>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2><span id="listTitle">Lidos nesta campanha</span> <small>gravado neste telemóvel</small></h2>
+    <ul class="list" id="list"></ul>
+    <p class="empty" id="emptyMsg"></p>
+    <div class="exportrow">
+      <button class="btn primary" id="xlsxBtn">Descarregar Excel</button>
+      <button class="btn" id="csvBtn">Descarregar CSV</button>
+      <button class="btn" id="copyBtn">Copiar tabela</button>
+    </div>
+    <p class="hint" id="exportHint"></p>
+  </section>
+
+  <section class="card"><h2><span id="missTitle">Por ler</span> <small id="nMissing"></small></h2><div class="missing" id="missing"></div></section>
+
+  <section class="card" id="campsCard">
+    <h2>Campanhas neste telemóvel</h2>
+    <div class="chips" id="camps" style="margin:0"></div>
+    <div class="exportrow"><button class="btn danger" id="delCamp">Apagar esta campanha</button></div>
+  </section>
+
+  <section class="card">
+    <h2>Aterro</h2>
+    <p class="hint" id="packInfo" style="margin-top:0"></p>
+    <div class="exportrow">
+      <button class="btn" data-load>Carregar pacote</button>
+      <button class="btn danger" id="removeInst">Remover do telemóvel</button>
+    </div>
+    <p class="ver" id="verWork"></p>
+  </section>
+</div>
+</main>
+<input type="file" id="packFile" accept=".json,application/json" multiple hidden>
+<div class="toast" id="toast" role="status"></div>
+
+<script src="vendor/leaflet.js"></script>
+<script src="vendor/proj4.js"></script>
+<script src="vendor/xlsx.full.min.js"></script>
+<script>
+'use strict';
+const APP_VERSION = '2026-10-13';
+// Cabeçalho do Excel de leituras. A importação de leituras do EGF Lab reconhece
+// estes nomes sem mapear colunas (formato longo); o teste
+// tests/test_field_app_export.py lê esta linha e confirma-o.
+// A posição do GPS vai em colunas que a importação NÃO reconhece de propósito:
+// com "Latitude"/"Longitude" um poço que não existe no EGF Lab era criado ali,
+// e um "1466" escrito em vez de "146" ficava um poço novo no cadastro. Poços
+// novos entram pelas Posições.
+const READING_COLUMNS = ["ID","Data","CH4_pct","O2_pct","H2S_ppm","CO2_pct","Estado","Nota","GPS latitude","GPS longitude","GPS precisão (m)","Hora"];
+const PACK_FORMAT = 'egflab-biogas-campo';
+const PACK_VERSION = 1;
+const LEGACY_KEY = 'pocos_palmela_v1';   // a primeira versão, só de Palmela
+const POS_NOTES = ['Danificado','Não encontrado','Tapado','Poço novo'];
+const DEFAULT_STATUSES = ['OK','Danificado','Sem acesso'];
+const MEAS = [
+  {id:'ch4', label:'CH₄', unit:'%'},
+  {id:'co2', label:'CO₂', unit:'%'},
+  {id:'o2',  label:'O₂',  unit:'%'},
+  {id:'h2s', label:'H₂S', unit:'ppm'},
+];
+
+const $ = id => document.getElementById(id);
+const pad = n => String(n).padStart(2, '0');
+const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+const dateFmt = iso => iso ? iso.slice(0,10).split('-').reverse().join('/') : '';
+const numFmt = n => n == null ? '—' : String(Math.round(n*10)/10).replace('.', ',');
+const natCmp = (a, b) => String(a).localeCompare(String(b), undefined, {numeric: true, sensitivity: 'base'});
+const codeKey = c => String(c).trim().toUpperCase();
+const slug = s => String(s||'aterro').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^A-Za-z0-9]+/g,'-').replace(/^-|-$/g,'') || 'aterro';
+function dist(a,b,c,d){const R=6371000,r=Math.PI/180,dl=(c-a)*r,dn=(d-b)*r;const h=Math.sin(dl/2)**2+Math.cos(a*r)*Math.cos(c*r)*Math.sin(dn/2)**2;return 2*R*Math.asin(Math.sqrt(h))}
+function toast(t){const el=$('toast');el.textContent=t;el.classList.add('show');clearTimeout(toast.t);toast.t=setTimeout(()=>el.classList.remove('show'),3200)}
+proj4.defs("EPSG:3763","+proj=tmerc +lat_0=39.6682583333333 +lon_0=-8.13310833333333 +k=1 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs");
+const tm06=(lat,lon)=>{const [x,y]=proj4('EPSG:4326','EPSG:3763',[lon,lat]);return [Math.round(x*100)/100,Math.round(y*100)/100]};
+
+/* ---------- Armazenamento ----------
+   IndexedDB, com uma tabela chave-valor só. O localStorage fica para quando
+   o IndexedDB não existe (alguns modos privados). */
+const store = (() => {
+  let dbp = null;
+  function open(){
+    if (!dbp) dbp = new Promise((res, rej) => {
+      if (!('indexedDB' in self)) return rej(new Error('sem IndexedDB'));
+      const r = indexedDB.open('pocos-campo', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('kv');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    return dbp;
+  }
+  function tx(mode, fn){
+    return open().then(db => new Promise((res, rej) => {
+      const t = db.transaction('kv', mode), req = fn(t.objectStore('kv'));
+      t.oncomplete = () => res(req && req.result);
+      t.onerror = t.onabort = () => rej(t.error);
+    }));
+  }
+  const lsKey = k => 'campo:' + k;
+  return {
+    get: k => tx('readonly', s => s.get(k)).catch(() => { try { const v = localStorage.getItem(lsKey(k)); return v ? JSON.parse(v) : undefined; } catch (e) { return undefined; } }),
+    set: (k, v) => tx('readwrite', s => s.put(v, k)).catch(() => localStorage.setItem(lsKey(k), JSON.stringify(v))),
+    del: k => tx('readwrite', s => s.delete(k)).catch(() => localStorage.removeItem(lsKey(k))),
+  };
+})();
+if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(()=>{});
+
+/* ---------- Estado ---------- */
+let packs = {};        // id do aterro -> pacote
+let prefs = {};        // aterro escolhido, modo, avisos já vistos
+let inst = null;       // o pacote do aterro aberto
+let wells = [];        // os poços dele, por ordem natural
+let wellByKey = {};
+let positions = {};    // código -> posição gravada
+let campaigns = {};    // data -> {código -> leitura}
+let campDate = todayISO();
+let mode = 'leituras';
+let status = 'OK';
+
+const instId = () => String(inst.installation.id);
+const savePrefs = () => store.set('prefs', prefs).catch(()=>{});
+async function persist(kind){
+  try {
+    if (kind === 'read') await store.set('read:' + instId(), campaigns);
+    else await store.set('pos:' + instId(), positions);
+  } catch (e) { toast('Não foi possível gravar no telemóvel — exporte já o Excel'); }
+}
+const doneMap = () => mode === 'leituras' ? (campaigns[campDate] || {}) : positions;
+
+/* ---------- Mapa ---------- */
+const map = L.map('map', {zoomControl:false, maxZoom:21, attributionControl:true}).setView([39.5,-8.1], 7);
+// crossOrigin: o servidor responde com CORS, e assim o sw.js pode guardar os
+// mosaicos sem respostas opacas.
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  {maxNativeZoom:19, maxZoom:21, crossOrigin:true, attribution:'Esri, Maxar'}).addTo(map);
+L.control.scale({imperial:false, position:'bottomleft'}).addTo(map);
+const wellLayer = L.layerGroup().addTo(map), recLayer = L.layerGroup().addTo(map);
+let wellMarkers = {};
+let follow = true, picking = false, wellsOn = true;
+map.on('dragstart', () => { if (!picking) { follow = false; $('followBtn').setAttribute('aria-pressed','false'); } });
+$('followBtn').onclick = () => { follow = !follow; $('followBtn').setAttribute('aria-pressed', follow); if (follow && fix) map.setView([fix.lat, fix.lon], Math.max(map.getZoom(), 19)); };
+$('wellsBtn').onclick = () => { wellsOn = !wellsOn; $('wellsBtn').setAttribute('aria-pressed', wellsOn); wellsOn ? wellLayer.addTo(map) : map.removeLayer(wellLayer); };
+$('pickBtn').onclick = () => setPick(!picking);
+
+function buildWellLayer(){
+  wellLayer.clearLayers(); wellMarkers = {};
+  wells.forEach(w => {
+    if (typeof w.lat !== 'number' || typeof w.lon !== 'number') return;
+    wellMarkers[w.code] = L.circleMarker([w.lat, w.lon], {radius:5, weight:1, color:'#000', fillColor:'#bdbdbd', fillOpacity:.9})
+      .bindTooltip(String(w.code), {permanent:true, direction:'right', offset:[5,0], className:'lbl-old'})
+      .on('click', () => { idEl.value = w.code; onIdChange(); })
+      .addTo(wellLayer);
+  });
+}
+// Onde está o poço, o melhor que se sabe: a posição gravada aqui ganha à do pacote.
+function bestPos(w){ const p = positions[w.code]; return p ? [p.lat, p.lon] : (typeof w.lat === 'number' ? [w.lat, w.lon] : null); }
+function styleWells(){
+  const done = campaigns[campDate] || {}, cur = curCode();
+  wells.forEach(w => {
+    const m = wellMarkers[w.code]; if (!m) return;
+    const here = w.code === cur;
+    let fill = '#bdbdbd';
+    if (mode === 'leituras') {
+      const r = done[w.code];
+      if (r) fill = r.status === 'OK' ? '#2fbf6b' : '#ff5a4f';
+      const p = bestPos(w); if (p) m.setLatLng(p);
+    } else {
+      m.setLatLng([w.lat, w.lon]);
+    }
+    m.setStyle({fillColor: fill, radius: here ? 9 : 5, weight: here ? 3 : 1, color: here ? '#f39200' : '#000'});
+    if (here) m.bringToFront();
+  });
+}
+function wellsBounds(){
+  const pts = wells.filter(w => typeof w.lat === 'number').map(w => [w.lat, w.lon]);
+  return pts.length ? L.latLngBounds(pts) : null;
+}
+function fitWells(){ const b = wellsBounds(); if (b) map.fitBounds(b, {padding:[20,20], maxZoom:18}); }
+function setPick(on){
+  picking = on; document.body.classList.toggle('picking', on); $('pickBtn').setAttribute('aria-pressed', on);
+  $('pickHint').hidden = !on; $('avgRow').hidden = on;
+  if (on) { follow = false; $('followBtn').setAttribute('aria-pressed','false'); if (map.getZoom() < 19) map.setZoom(19); window.scrollTo({top:0, behavior:'smooth'}); }
+  updateButtons();
+}
+
+/* ---------- GPS ---------- */
+let fix = null, samples = [], meM = null, meC = null;
+const accClass = a => a <= 5 ? 'good' : a <= 15 ? 'warn' : 'bad';
+function onFix(p){
+  const c = p.coords; fix = {lat:c.latitude, lon:c.longitude, acc:c.accuracy, alt:c.altitude, t:Date.now()};
+  samples.push(fix); if (samples.length > 80) samples.shift();
+  const a = $('accPill'); a.className = 'a ' + accClass(c.accuracy); a.textContent = '±' + Math.round(c.accuracy) + ' m';
+  $('statusPill').textContent = c.accuracy <= 5 ? 'Bom sinal' : c.accuracy <= 15 ? 'Razoável — espere' : 'Fraco — espere';
+  $('gpsBanner').hidden = true;
+  const ll = [c.latitude, c.longitude];
+  if (!meM) {
+    meC = L.circle(ll, {radius:c.accuracy, color:'#2f8bff', weight:1, fillOpacity:.15, interactive:false}).addTo(map);
+    meM = L.circleMarker(ll, {radius:7, weight:3, color:'#fff', fillColor:'#2f8bff', fillOpacity:1, interactive:false}).addTo(map);
+    // Longe do aterro (no escritório, a caminho) o mapa fica no aterro.
+    const b = wellsBounds();
+    if (b && dist(ll[0], ll[1], b.getCenter().lat, b.getCenter().lng) > 3000) { follow = false; $('followBtn').setAttribute('aria-pressed','false'); }
+    else map.setView(ll, 19);
+  } else {
+    meM.setLatLng(ll); meC.setLatLng(ll).setRadius(c.accuracy);
+    if (follow && !picking) map.panTo(ll, {animate:true});
+  }
+  updateButtons(); updateInfo();
+}
+function onErr(e){
+  $('statusPill').textContent = e.code === 1 ? 'Localização bloqueada' : 'Ainda sem GPS';
+  if (e.code === 1 || e.code === 2) {
+    const b = $('gpsBanner'); b.hidden = false;
+    b.textContent = location.protocol !== 'https:' && location.hostname !== 'localhost'
+      ? 'A página tem de ser aberta num endereço https:// para o GPS funcionar. As leituras gravam-se na mesma, sem posição.'
+      : 'A localização está bloqueada para esta página. Autorize-a nas definições do navegador (e na localização do telemóvel) e recarregue. As leituras gravam-se na mesma; nas posições pode usar "Escolher no mapa".';
+  }
+  updateButtons();
+}
+if ('geolocation' in navigator) navigator.geolocation.watchPosition(onFix, onErr, {enableHighAccuracy:true, maximumAge:0, timeout:30000}); else onErr({code:2});
+
+/* ---------- Escolher o poço ----------
+   Os códigos são texto ("P-146" existe), por isso o + e o − andam pela lista
+   ordenada e não somam um ao número. */
+const idEl = $('wid');
+function findWell(typed){
+  const t = String(typed || '').trim(); if (!t) return null;
+  let w = wellByKey[codeKey(t)];
+  if (!w && /^\d+$/.test(t)) w = wellByKey[String(parseInt(t, 10))];
+  return w || null;
+}
+function curCode(){ const w = findWell(idEl.value); return w ? w.code : idEl.value.trim(); }
+function nextMissing(from){
+  const codes = wells.map(w => w.code), done = doneMap();
+  const start = from == null ? -1 : codes.indexOf(from);
+  for (let i = 1; i <= codes.length; i++) { const c = codes[(start + i + codes.length) % codes.length]; if (!done[c]) return c; }
+  return from || codes[0] || '';
+}
+function step(dir){
+  const codes = wells.map(w => w.code); if (!codes.length) return;
+  const cur = curCode(); let i = codes.indexOf(cur);
+  if (i < 0) {   // escrito à mão e fora da lista: o vizinho pela ordem natural
+    i = dir > 0 ? codes.findIndex(c => natCmp(c, cur) > 0) : codes.map(c => natCmp(c, cur) < 0).lastIndexOf(true);
+    if (i < 0) i = dir > 0 ? 0 : codes.length - 1;
+  } else i = Math.min(codes.length - 1, Math.max(0, i + dir));
+  idEl.value = codes[i]; onIdChange();
+}
+$('inc').onclick = () => step(1);
+$('dec').onclick = () => step(-1);
+idEl.addEventListener('input', onIdChange);
+idEl.addEventListener('focus', () => idEl.select());
+idEl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); if (mode === 'leituras') $('ch4').focus(); else idEl.blur(); } });
+
+function onIdChange(){
+  if (mode === 'leituras') fillForm((campaigns[campDate] || {})[curCode()]);
+  else { document.querySelectorAll('#posChips .chip').forEach(c => c.setAttribute('aria-pressed','false')); $('note').value = ''; }
+  updateInfo(); updateButtons(); styleWells();
+}
+function nearestWell(){
+  let best = null;
+  wells.forEach(w => { const p = bestPos(w); if (!p) return; const d = dist(fix.lat, fix.lon, p[0], p[1]); if (!best || d < best.d) best = {code:w.code, d}; });
+  return best;
+}
+function updateInfo(){
+  const el = $('wellInfo'), code = curCode(), w = findWell(idEl.value);
+  el.className = 'wellinfo'; el.replaceChildren();
+  if (!code) { el.textContent = 'Escreva o número do poço'; $('lastInfo').textContent = ''; return; }
+  let t = w ? (w.type || 'Tipo por indicar')
+    : mode === 'leituras' ? 'Não está no pacote: a leitura grava-se, mas só entra no EGF Lab depois de o poço ser criado (em Posições).'
+    : 'Não está no pacote — fica como poço novo.';
+  const done = doneMap()[code];
+  if (done) {
+    el.className = 'wellinfo dup';
+    t = mode === 'leituras' ? 'Já lido nesta campanha — gravar substitui.' : 'Já gravado. Gravar outra vez substitui.';
+    if (mode !== 'leituras' && fix) t += ` Está a ${Math.round(dist(fix.lat, fix.lon, done.lat, done.lon))} m dele.`;
+  }
+  el.append(t);
+  if (fix && fix.acc <= 25 && wells.length) {
+    const n = nearestWell();
+    if (n && n.code !== code && n.d <= 30) {
+      const b = document.createElement('button'); b.className = 'linkbtn';
+      b.textContent = `Mais perto: poço ${n.code} (${Math.round(n.d)} m)`;
+      b.onclick = () => { idEl.value = n.code; onIdChange(); };
+      el.append(' ', b);
+    }
+  }
+  if (mode === 'leituras') {
+    const last = inst && inst.lastReadings ? inst.lastReadings[w ? w.code : code] : null;
+    $('lastInfo').textContent = last
+      ? `Última leitura · ${dateFmt(last.date)}: CH₄ ${numFmt(last.ch4)} · CO₂ ${numFmt(last.co2)} · O₂ ${numFmt(last.o2)} · H₂S ${numFmt(last.h2s)}` + (last.status && last.status !== 'OK' ? ` · ${last.status}` : '')
+      : (w ? 'Sem leituras anteriores no pacote.' : '');
+  }
+}
+
+/* ---------- Leituras ---------- */
+function readVal(id){
+  const s = $(id).value.trim().replace(/\s/g, '').replace(',', '.');
+  if (s === '') return null;
+  const v = Number(s);
+  return Number.isFinite(v) ? v : NaN;
+}
+function formValues(){ const v = {}; MEAS.forEach(m => v[m.id] = readVal(m.id)); return v; }
+function fillForm(r){
+  MEAS.forEach(m => $(m.id).value = r && r[m.id] != null ? String(r[m.id]).replace('.', ',') : '');
+  $('rNote').value = r ? (r.note || '') : '';
+  setStatus(r ? r.status : 'OK');
+}
+function buildStatusChips(){
+  const box = $('statusChips'); box.replaceChildren();
+  ((inst.statuses && inst.statuses.length) ? inst.statuses : DEFAULT_STATUSES).forEach(addStatusChip);
+}
+function addStatusChip(s){
+  const b = document.createElement('button'); b.type = 'button'; b.className = 'chip';
+  b.textContent = s; b.dataset.status = s; b.setAttribute('aria-pressed', String(s === status));
+  b.onclick = () => setStatus(s);
+  $('statusChips').appendChild(b);
+}
+function setStatus(s){
+  status = s || 'OK';
+  const chips = [...document.querySelectorAll('#statusChips .chip')];
+  if (!chips.some(c => c.dataset.status === status)) addStatusChip(status);
+  document.querySelectorAll('#statusChips .chip').forEach(c => c.setAttribute('aria-pressed', String(c.dataset.status === status)));
+  runChecks();
+}
+function bandFor(x){
+  const bands = (inst && inst.balanceBands) || [];
+  // A convenção do motor de indicadores do EGF Lab: min incluído, max excluído.
+  return bands.slice().sort((a, b) => (a.min == null ? -Infinity : a.min) - (b.min == null ? -Infinity : b.min))
+    .find(b => (b.min == null || b.min <= x) && (b.max == null || x < b.max)) || null;
+}
+const BAND_CLASS = {OK:'good', Monitor:'warn', Warning:'warn', Critical:'bad'};
+// O que se verifica enquanto se escreve. "hard" pede confirmação ao gravar;
+// "soft" é só para olhar duas vezes. Nada bloqueia: quem está ao pé do poço
+// é que sabe.
+function evaluate(v, last){
+  const hard = [], soft = [], badIds = new Set();
+  MEAS.forEach(m => { if (Number.isNaN(v[m.id])) { hard.push(`${m.label}: não é um número`); badIds.add(m.id); } });
+  const ok = x => typeof x === 'number' && !Number.isNaN(x);
+  ['ch4','co2','o2'].forEach(k => {
+    if (ok(v[k]) && (v[k] < 0 || v[k] > 100)) { hard.push(`${MEAS.find(m => m.id === k).label} fora de 0–100 %`); badIds.add(k); }
+  });
+  if (ok(v.h2s) && v.h2s < 0) { hard.push('H₂S negativo'); badIds.add('h2s'); }
+  if (ok(v.h2s) && v.h2s > 10000) { hard.push('H₂S acima de 10 000 ppm'); badIds.add('h2s'); }
+  let balance = null;
+  if (ok(v.ch4) && ok(v.co2) && ok(v.o2)) {
+    const sum = v.ch4 + v.co2 + v.o2;
+    if (sum > 102) { hard.push(`CH₄ + CO₂ + O₂ = ${numFmt(sum)} % (mais de 100)`); ['ch4','co2','o2'].forEach(k => badIds.add(k)); }
+    balance = 100 - sum;
+  }
+  if (last) {
+    const jump = (k, lim) => {
+      if (ok(v[k]) && typeof last[k] === 'number' && Math.abs(v[k] - last[k]) >= lim)
+        soft.push(`${MEAS.find(m => m.id === k).label}: ${numFmt(last[k])} na última leitura, ${numFmt(v[k])} agora`);
+    };
+    jump('ch4', 15); jump('co2', 15); jump('o2', 5);
+    if (ok(v.h2s) && typeof last.h2s === 'number' && Math.abs(v.h2s - last.h2s) >= 100
+        && (v.h2s >= 3 * last.h2s || 3 * v.h2s <= last.h2s))
+      soft.push(`H₂S: ${numFmt(last.h2s)} na última leitura, ${numFmt(v.h2s)} agora`);
+  }
+  return {hard, soft, balance, band: balance == null ? null : bandFor(balance), badIds};
+}
+function lastFor(code){ return inst && inst.lastReadings ? inst.lastReadings[code] : null; }
+function runChecks(){
+  const box = $('checks'); box.replaceChildren();
+  if (!inst) return;
+  const ev = evaluate(formValues(), lastFor(curCode()));
+  MEAS.forEach(m => $(m.id).classList.toggle('bad', ev.badIds.has(m.id)));
+  if (ev.balance != null) {
+    const s = document.createElement('span');
+    s.className = 'bal ' + (ev.band ? (BAND_CLASS[ev.band.status] || 'none') : 'none');
+    s.textContent = `Gás de balanço ${numFmt(ev.balance)} %` + (ev.band && ev.band.label ? ` · ${ev.band.label}` : '');
+    box.appendChild(s);
+  }
+  ev.hard.forEach(t => { const d = document.createElement('div'); d.className = 'warnline hard'; d.textContent = '⚠ ' + t; box.appendChild(d); });
+  ev.soft.forEach(t => { const d = document.createElement('div'); d.className = 'warnline'; d.textContent = '↕ ' + t; box.appendChild(d); });
+}
+MEAS.forEach((m, i) => {
+  const el = $(m.id);
+  el.addEventListener('input', runChecks);
+  el.addEventListener('focus', () => el.select());
+  el.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (i < MEAS.length - 1) $(MEAS[i+1].id).focus(); else el.blur();
+  });
+});
+$('saveReading').onclick = async () => {
+  const code = curCode();
+  if (!code) return toast('Escolha um poço');
+  const v = formValues();
+  if (MEAS.some(m => Number.isNaN(v[m.id]))) return toast('Há um valor que não é um número');
+  const any = MEAS.some(m => v[m.id] != null);
+  if (!any && status === 'OK') return toast('Preencha as medições, ou escolha um estado (ex.: Sem acesso)');
+  // Um poço fora do pacote é quase sempre um número mal escrito.
+  if (!findWell(idEl.value) && !confirm(`O poço ${code} não está no pacote de ${inst.installation.name}. Gravar mesmo assim?`)) return;
+  const ev = evaluate(v, lastFor(code));
+  if (ev.hard.length && !confirm('Atenção:\n' + ev.hard.join('\n') + '\n\nGravar mesmo assim?')) return;
+  const g = fix && Date.now() - fix.t < 60000 ? fix : null;
+  const camp = campaigns[campDate] || (campaigns[campDate] = {});
+  camp[code] = {
+    code, ch4: v.ch4, co2: v.co2, o2: v.o2, h2s: v.h2s, status,
+    note: $('rNote').value.trim(),
+    lat: g ? +g.lat.toFixed(7) : null, lon: g ? +g.lon.toFixed(7) : null,
+    acc: g ? Math.round(g.acc * 10) / 10 : null,
+    savedAt: new Date().toISOString(),
+  };
+  await persist('read');
+  toast(`Poço ${code} gravado`);
+  if (navigator.vibrate) navigator.vibrate(60);
+  idEl.value = nextMissing(code); onIdChange(); render();
+  window.scrollTo({top: $('wid').getBoundingClientRect().top + window.scrollY - 80, behavior:'smooth'});
+};
+
+/* ---------- Posições ---------- */
+document.querySelectorAll('#posChips .chip').forEach(c => c.onclick = () => {
+  c.setAttribute('aria-pressed', c.getAttribute('aria-pressed') !== 'true');
+  const on = [...document.querySelectorAll('#posChips .chip[aria-pressed="true"]')].map(x => x.dataset.note);
+  const free = $('note').value.split(';').map(s => s.trim()).filter(s => s && !POS_NOTES.includes(s));
+  $('note').value = [...on, ...free].join('; ');
+});
+let busy = false;
+function updateButtons(){
+  const code = curCode();
+  if (mode === 'leituras') {
+    $('saveReading').disabled = !code;
+    $('saveLabel').textContent = !code ? 'Escolha um poço' : (doneMap()[code] ? `Gravar de novo o poço ${code}` : `Gravar leitura do poço ${code}`);
+    return;
+  }
+  if (busy) return;
+  const b = $('recBtn');
+  if (picking) { b.disabled = !code; $('recLabel').textContent = code ? `Gravar a posição da cruz como poço ${code}` : 'Escreva o número do poço'; return; }
+  b.disabled = !fix || !code;
+  $('recLabel').textContent = !fix ? 'À espera do GPS… (ou use Escolher no mapa)' : !code ? 'Escreva o número do poço' : (positions[code] ? `Gravar de novo o poço ${code}` : `Gravar posição do poço ${code}`);
+}
+$('recBtn').onclick = async () => {
+  const code = curCode(); if (!code || busy) return;
+  if (positions[code] && !confirm(`O poço ${code} já tem posição gravada. Substituir?`)) return;
+  if (picking) { const c = map.getCenter(); savePos(code, {lat:c.lat, lon:c.lng, acc:null, alt:null, n:0}, 'Map'); setPick(false); return; }
+  if (!fix) return;
+  let pos;
+  if ($('avg').checked) {
+    busy = true; $('recBtn').disabled = true; const start = Date.now(); samples = [fix];
+    await new Promise(res => { const iv = setInterval(() => { const el = (Date.now() - start) / 1000;
+      $('recBar').style.width = Math.min(100, el * 10) + '%'; $('recLabel').textContent = `Fique parado… ${Math.max(0, Math.ceil(10 - el))} s`;
+      if (el >= 10) { clearInterval(iv); res(); } }, 200); });
+    const best = Math.min(...samples.map(s => s.acc)), use = samples.filter(s => s.acc <= best * 1.5 + 1);
+    let w = 0, la = 0, lo = 0, al = 0, aw = 0;
+    use.forEach(s => { const k = 1 / (s.acc * s.acc); w += k; la += s.lat * k; lo += s.lon * k; if (s.alt != null) { al += s.alt * k; aw += k; } });
+    const accs = use.map(s => s.acc).sort((a, b) => a - b);
+    pos = {lat:la/w, lon:lo/w, acc:accs[Math.floor(accs.length/2)], alt:aw ? al/aw : null, n:use.length};
+    busy = false; $('recBar').style.width = '0';
+  } else pos = {lat:fix.lat, lon:fix.lon, acc:fix.acc, alt:fix.alt, n:1};
+  savePos(code, pos, 'GPS');
+};
+async function savePos(code, pos, src){
+  positions[code] = {code, lat:+pos.lat.toFixed(7), lon:+pos.lon.toFixed(7),
+    acc: pos.acc != null ? Math.round(pos.acc * 10) / 10 : null,
+    alt: pos.alt != null ? Math.round(pos.alt * 10) / 10 : null,
+    n: pos.n, src, note: $('note').value.trim(), savedAt: new Date().toISOString()};
+  await persist('pos');
+  toast(`Poço ${code} gravado` + (pos.acc != null ? ` (±${Math.round(pos.acc)} m)` : ' a partir do mapa'));
+  if (navigator.vibrate) navigator.vibrate(60);
+  idEl.value = nextMissing(code); onIdChange(); render();
+}
+
+/* ---------- Listas ---------- */
+function render(){
+  if (!inst) return;
+  const done = doneMap();
+  $('nDone').textContent = wells.filter(w => done[w.code]).length;
+  $('nTotal').textContent = wells.length;
+  const ids = Object.keys(done).sort((a, b) => (done[b].savedAt || '').localeCompare(done[a].savedAt || ''));
+  $('emptyMsg').hidden = ids.length > 0;
+  $('emptyMsg').textContent = mode === 'leituras' ? 'Ainda nada lido nesta campanha.' : 'Ainda nenhuma posição gravada.';
+  const ul = $('list'); ul.replaceChildren();
+  ids.forEach(code => {
+    const r = done[code], li = document.createElement('li');
+    const lid = document.createElement('button'); lid.className = 'lid'; lid.textContent = code;
+    const meta = document.createElement('div'); meta.className = 'lmeta';
+    const b = document.createElement('b'), sub = document.createElement('span');
+    const t = new Date(r.savedAt).toLocaleTimeString('pt-PT', {hour:'2-digit', minute:'2-digit'});
+    if (mode === 'leituras') {
+      const vals = MEAS.filter(m => r[m.id] != null).map(m => `${m.label} ${numFmt(r[m.id])}`).join(' · ');
+      b.textContent = vals || '—';
+      sub.textContent = t + (r.note ? ' · ' + r.note : '');
+      meta.append(b, document.createElement('br'));
+      if (r.status !== 'OK') { const st = document.createElement('span'); st.className = 'st'; st.textContent = r.status + ' · '; meta.append(st); }
+      meta.append(sub);
+      lid.onclick = () => { idEl.value = code; onIdChange(); window.scrollTo({top: $('wid').getBoundingClientRect().top + window.scrollY - 80, behavior:'smooth'}); };
+    } else {
+      b.textContent = (r.acc != null ? '±' + Math.round(r.acc) + ' m' : r.src === 'Map' ? 'pelo mapa' : 'manual') + ' · ' + t + (r.note ? ' · ' + r.note : '');
+      sub.textContent = r.lat.toFixed(6) + ', ' + r.lon.toFixed(6);
+      meta.append(b, document.createElement('br'), sub);
+      lid.onclick = () => { follow = false; $('followBtn').setAttribute('aria-pressed','false'); map.setView([r.lat, r.lon], 20); window.scrollTo({top:0, behavior:'smooth'}); };
+    }
+    const del = document.createElement('button'); del.className = 'del'; del.textContent = '×';
+    del.setAttribute('aria-label', 'Apagar poço ' + code);
+    del.onclick = async () => {
+      if (!confirm(`Apagar ${mode === 'leituras' ? 'a leitura' : 'a posição'} do poço ${code}?`)) return;
+      delete done[code];
+      if (mode === 'leituras' && !Object.keys(done).length) delete campaigns[campDate];
+      await persist(mode === 'leituras' ? 'read' : 'pos'); onIdChange(); render();
+    };
+    li.append(lid, meta, del); ul.appendChild(li);
+  });
+
+  const miss = wells.filter(w => !done[w.code]).map(w => w.code);
+  $('nMissing').textContent = miss.length ? `${miss.length} poço${miss.length === 1 ? '' : 's'}` : '';
+  const mbox = $('missing'); mbox.replaceChildren();
+  if (!miss.length) { const s = document.createElement('span'); s.className = 'missnone'; s.textContent = `Todos os ${wells.length} poços feitos.`; mbox.appendChild(s); }
+  miss.forEach(c => { const b = document.createElement('button'); b.className = 'mcode'; b.textContent = c;
+    b.onclick = () => { idEl.value = c; onIdChange(); window.scrollTo({top: $('wid').getBoundingClientRect().top + window.scrollY - 80, behavior:'smooth'}); };
+    mbox.appendChild(b); });
+
+  // Campanhas guardadas deste aterro, a mais recente primeiro.
+  const cbox = $('camps'); cbox.replaceChildren();
+  const dates = Object.keys(campaigns).filter(d => Object.keys(campaigns[d]).length).sort().reverse();
+  if (!dates.includes(campDate)) dates.unshift(campDate);
+  dates.forEach(d => { const b = document.createElement('button'); b.className = 'chip';
+    const n = Object.keys(campaigns[d] || {}).length;
+    b.textContent = `${dateFmt(d)} · ${n}`; b.setAttribute('aria-pressed', String(d === campDate));
+    b.onclick = () => setCampaign(d); cbox.appendChild(b); });
+  $('delCamp').disabled = !Object.keys(campaigns[campDate] || {}).length;
+
+  recLayer.clearLayers();
+  if (mode === 'posicoes') Object.values(positions).forEach(r => L.circleMarker([r.lat, r.lon], {radius:7, weight:2, color:'#000', fillColor:'#f39200', fillOpacity:1})
+    .bindTooltip(String(r.code), {permanent:true, direction:'right', offset:[6,0], className:'lbl-rec'}).addTo(recLayer));
+  styleWells();
+}
+function setCampaign(d){ campDate = d || todayISO(); $('campDate').value = campDate; onIdChange(); render(); }
+$('campDate').addEventListener('change', () => setCampaign($('campDate').value));
+$('delCamp').onclick = async () => {
+  const n = Object.keys(campaigns[campDate] || {}).length; if (!n) return;
+  if (!confirm(`Apagar as ${n} leituras de ${dateFmt(campDate)} deste telemóvel? Confirme primeiro que o Excel chegou ao escritório.`)) return;
+  delete campaigns[campDate]; await persist('read'); onIdChange(); render();
+};
+
+/* ---------- Exportar ---------- */
+const excelDate = iso => { const [y, m, d] = iso.split('-').map(Number); return (Date.UTC(y, m-1, d) - Date.UTC(1899, 11, 30)) / 86400000; };
+// Número no Excel só quando o código é um número sem zeros à esquerda: "007"
+// passava a 7 e deixava de bater com o poço "007" do EGF Lab.
+const idCell = c => /^\d+$/.test(c) && String(Number(c)) === c ? Number(c) : c;
+function readingRows(){
+  const camp = campaigns[campDate] || {};
+  return Object.keys(camp).sort(natCmp).map(code => { const r = camp[code]; return [
+    idCell(code), campDate, r.ch4, r.o2, r.h2s, r.co2, r.status, r.note || '',
+    r.lat, r.lon, r.acc, new Date(r.savedAt).toLocaleTimeString('pt-PT', {hour:'2-digit', minute:'2-digit'}),
+  ]; });
+}
+function positionRows(){
+  const head = ['ID','Tipo','Latitude','Longitude','Precisão (m)','Altitude (m)','PT-TM06 X (m)','PT-TM06 Y (m)','Nº leituras','Origem','Nota','Data/hora','Latitude antiga','Longitude antiga','Distância ao registo antigo (m)'];
+  const rows = Object.keys(positions).sort(natCmp).map(code => {
+    const r = positions[code], w = findWell(code), [x, y] = tm06(r.lat, r.lon);
+    const old = w && typeof w.lat === 'number';
+    return [idCell(code), w ? (w.type || '') : '', r.lat, r.lon, r.acc, r.alt, x, y, r.n, r.src === 'Map' ? 'Mapa' : 'GPS', r.note || '',
+      new Date(r.savedAt).toLocaleString('pt-PT'), old ? w.lat : '', old ? w.lon : '', old ? Math.round(dist(w.lat, w.lon, r.lat, r.lon)) : ''];
+  });
+  return [head, rows];
+}
+function exportData(){
+  return mode === 'leituras' ? [READING_COLUMNS, readingRows()] : positionRows();
+}
+function fileBase(){
+  const name = slug(inst.installation.name);
+  return mode === 'leituras' ? `Leituras_${name}_${campDate}` : `Posicoes_${name}_${new Date().toISOString().slice(0,16).replace(/[:T]/g,'-')}`;
+}
+function dl(blob, name){ const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); }
+$('xlsxBtn').onclick = () => {
+  const [head, rows] = exportData(); if (!rows.length) return toast('Ainda nada para exportar');
+  if (!window.XLSX) return toast('A biblioteca do Excel não carregou — use o CSV');
+  const ws = XLSX.utils.aoa_to_sheet([head, ...rows.map(r => r.map((v, i) => mode === 'leituras' && i === 1 ? excelDate(v) : v))]);
+  if (mode === 'leituras') {
+    // A coluna Data como data do Excel, e não texto: abre como data e a
+    // importação lê-a como data. O número de série calcula-se em UTC, que é o
+    // que evita o dia a mais ou a menos dos fusos horários.
+    for (let r = 1; r <= rows.length; r++) { const cell = ws[XLSX.utils.encode_cell({r, c:1})]; if (cell) { cell.t = 'n'; cell.z = 'dd/mm/yyyy'; } }
+  }
+  ws['!cols'] = head.map(k => ({wch: Math.max(9, k.length + 2)}));
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, mode === 'leituras' ? 'Leituras' : 'Coordenadas');
+  dl(new Blob([XLSX.write(wb, {bookType:'xlsx', type:'array'})], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}), fileBase() + '.xlsx');
+};
+$('csvBtn').onclick = () => {
+  const [head, rows] = exportData(); if (!rows.length) return toast('Ainda nada para exportar');
+  const cell = (v, i) => { if (v == null) return ''; if (mode === 'leituras' && i === 1) return dateFmt(v);
+    return typeof v === 'number' ? String(v).replace('.', ',') : '"' + String(v).replace(/"/g, '""') + '"'; };
+  const csv = '\ufeff' + [head.join(';'), ...rows.map(r => r.map(cell).join(';'))].join('\r\n');
+  dl(new Blob([csv], {type:'text/csv'}), fileBase() + '.csv');
+};
+$('copyBtn').onclick = async () => {
+  const [head, rows] = exportData(); if (!rows.length) return toast('Ainda nada para copiar');
+  const tsv = [head.join('\t'), ...rows.map(r => r.map((v, i) => v == null ? '' : (mode === 'leituras' && i === 1 ? dateFmt(v) : v)).join('\t'))].join('\n');
+  try { await navigator.clipboard.writeText(tsv); toast('Copiado — cole no Excel'); } catch (e) { toast('Não foi possível copiar — use Descarregar'); }
+};
+
+/* ---------- Modo ---------- */
+function setMode(m){
+  mode = m === 'posicoes' ? 'posicoes' : 'leituras';
+  prefs.mode = mode; savePrefs();
+  const r = mode === 'leituras';
+  document.body.classList.toggle('m-leituras', r);
+  $('tabRead').setAttribute('aria-pressed', r); $('tabPos').setAttribute('aria-pressed', !r);
+  $('readForm').hidden = !r; $('posForm').hidden = r; $('campRow').hidden = !r; $('campsCard').hidden = !r;
+  $('pickBtn').hidden = r; if (r && picking) setPick(false);
+  $('listTitle').textContent = r ? 'Lidos nesta campanha' : 'Posições gravadas';
+  $('missTitle').textContent = r ? 'Por ler' : 'Sem posição';
+  $('exportHint').textContent = r
+    ? 'Envie o Excel ao escritório: entra no EGF Lab em Biogás › Importar leituras, sem mapear colunas. As leituras ficam neste telemóvel até apagar a campanha.'
+    : 'Envie o Excel ao escritório: entra no EGF Lab em Biogás › Poços › Importar poços. As posições ficam neste telemóvel até remover o aterro.';
+  setTimeout(() => map.invalidateSize(), 50);
+  onIdChange(); render();
+}
+$('tabRead').onclick = () => setMode('leituras');
+$('tabPos').onclick = () => setMode('posicoes');
+
+/* ---------- Aterros (pacotes) ---------- */
+function validPack(p){ return p && p.format === PACK_FORMAT && p.installation && p.installation.id != null && Array.isArray(p.wells); }
+async function selectInst(id){
+  inst = packs[id]; prefs.instId = id; savePrefs();
+  wells = inst.wells.filter(w => w && w.code != null).map(w => ({...w, code: String(w.code)})).sort((a, b) => natCmp(a.code, b.code));
+  wellByKey = {}; wells.forEach(w => wellByKey[codeKey(w.code)] = w);
+  positions = (await store.get('pos:' + id)) || {};
+  campaigns = (await store.get('read:' + id)) || {};
+  campDate = todayISO(); $('campDate').value = campDate; $('campDate').max = todayISO();
+  idEl.inputMode = wells.length && wells.every(w => /^\d+$/.test(w.code)) ? 'numeric' : 'text';
+  const sel = $('instSel'); sel.replaceChildren();
+  Object.values(packs).sort((a, b) => natCmp(a.installation.name, b.installation.name)).forEach(p => {
+    const o = document.createElement('option'); o.value = String(p.installation.id); o.textContent = p.installation.name; sel.appendChild(o); });
+  sel.value = id;
+  const i = inst.installation;
+  $('packInfo').textContent = `${i.company ? i.company + ' · ' : ''}${i.municipality || ''} · ${wells.length} poços · pacote de ${dateFmt(inst.generatedAt)}`;
+  buildWellLayer(); buildStatusChips(); fitWells();
+  $('setup').hidden = true; $('work').hidden = false;
+  setMode(mode);
+  idEl.value = nextMissing(null); onIdChange(); render();
+  setTimeout(() => map.invalidateSize(), 50);
+}
+$('instSel').addEventListener('change', e => selectInst(e.target.value).then(maybeMigrateLegacy));
+function showSetup(){
+  inst = null; wells = []; wellByKey = {}; wellLayer.clearLayers(); recLayer.clearLayers();
+  $('setup').hidden = false; $('work').hidden = true;
+}
+document.querySelectorAll('[data-load]').forEach(b => b.onclick = () => $('packFile').click());
+$('packFile').addEventListener('change', async e => {
+  const files = [...e.target.files]; e.target.value = '';
+  const loaded = [], bad = [];
+  for (const f of files) {
+    try {
+      const p = JSON.parse(await f.text());
+      if (p && p.format === PACK_FORMAT && p.version > PACK_VERSION) { bad.push(`${f.name}: pacote de uma versão mais recente — atualize a aplicação`); continue; }
+      if (!validPack(p)) throw new Error();
+      packs[String(p.installation.id)] = p; loaded.push(p);
+    } catch (err) { bad.push(`${f.name}: não é um pacote de campo do EGF Lab`); }
+  }
+  if (loaded.length) {
+    await store.set('packs', packs);
+    const last = loaded[loaded.length - 1];
+    await selectInst(String(last.installation.id));
+    await maybeMigrateLegacy();
+    toast(loaded.length === 1 ? `${last.installation.name}: ${last.wells.length} poços carregados` : `${loaded.length} aterros carregados`);
+  }
+  if (bad.length) setTimeout(() => alert(bad.join('\n')), loaded.length ? 400 : 0);
+});
+$('removeInst').onclick = async () => {
+  const id = instId(), name = inst.installation.name;
+  const nr = Object.values(campaigns).reduce((a, c) => a + Object.keys(c).length, 0), np = Object.keys(positions).length;
+  if (!confirm(`Remover ${name} deste telemóvel?` + (nr || np ? `\n\nApaga também ${nr} leituras e ${np} posições guardadas aqui. Exporte primeiro o que ainda não chegou ao escritório.` : ''))) return;
+  delete packs[id];
+  await store.set('packs', packs); await store.del('pos:' + id); await store.del('read:' + id);
+  const ids = Object.keys(packs);
+  if (ids.length) await selectInst(ids[0]); else showSetup();
+};
+
+// A primeira versão só servia Palmela e guardava as posições no localStorage.
+// Ao abrir o pacote de Palmela pela primeira vez, oferece-se juntá-las. O
+// original fica onde estava, por segurança.
+async function maybeMigrateLegacy(){
+  if (prefs.legacyDone || !inst) return;
+  let old = null;
+  try { old = JSON.parse(localStorage.getItem(LEGACY_KEY) || 'null'); } catch (e) {}
+  if (!old || !Object.keys(old).length) { prefs.legacyDone = true; savePrefs(); return; }
+  if (!/palmela/i.test(inst.installation.name)) return;
+  const n = Object.keys(old).length;
+  if (confirm(`Este telemóvel tem ${n} posições gravadas na versão anterior da aplicação (Palmela). Juntá-las a ${inst.installation.name}?`)) {
+    let added = 0;
+    Object.entries(old).forEach(([id, r]) => {
+      if (positions[id] || typeof r.lat !== 'number') return;
+      positions[id] = {code:id, lat:r.lat, lon:r.lon, acc:r.acc, alt:r.alt, n:r.n, src:r.src, note:r.note || '', savedAt:r.savedAt};
+      added++;
+    });
+    await persist('pos'); render();
+    toast(`${added} posições juntas a ${inst.installation.name}`);
+  }
+  prefs.legacyDone = true; savePrefs();
+}
+
+/* ---------- Arranque ---------- */
+(async function init(){
+  $('verSetup').textContent = $('verWork').textContent = 'Versão ' + APP_VERSION;
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const standalone = navigator.standalone || matchMedia('(display-mode: standalone)').matches;
+  packs = (await store.get('packs')) || {};
+  prefs = (await store.get('prefs')) || {};
+  mode = prefs.mode === 'posicoes' ? 'posicoes' : 'leituras';
+  if (isIOS && !standalone && !prefs.iosHintDone) $('iosHint').hidden = false;
+  $('iosHintClose').onclick = () => { $('iosHint').hidden = true; prefs.iosHintDone = true; savePrefs(); };
+  const ids = Object.keys(packs);
+  if (!ids.length) showSetup();
+  else { await selectInst(packs[prefs.instId] ? prefs.instId : ids[0]); await maybeMigrateLegacy(); }
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || ['localhost','127.0.0.1'].includes(location.hostname)))
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+})();
+</script></body></html>
