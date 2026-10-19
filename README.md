@@ -7,6 +7,15 @@ telemóvel nunca chega à rede da empresa. Os dados andam em ficheiros:
     EGF Lab ── pacote de campo (.json) ──▶ telemóvel ── Excel de leituras ──▶ EGF Lab
     Biogás › Poços / Mapa                                    Biogás › Importar leituras
 
+## Aterro sem poços
+
+Um aterro sem poços também tem pacote (lista vazia, mais as coordenadas da
+instalação para o mapa abrir no sítio). A aplicação abre-o nas Posições: o
+operador grava cada poço — número (1, 2, 3…), tipo e GPS — e o Excel das
+posições entra em Biogás › Poços › Importar poços, que os cria. Pode ler os
+poços novos no mesmo dia; nesse caso o escritório importa primeiro as
+posições e só depois as leituras (a aplicação lembra-o junto ao Excel).
+
 ## Publicar
 
 Automático. Cada commit do `main` que passa nos testes copia esta pasta para

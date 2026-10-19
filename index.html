@@ -151,7 +151,12 @@ ul.list li:first-child{border-top:0}
 <div id="work" hidden>
   <div class="instrow">
     <select id="instSel" aria-label="Aterro"></select>
-    <div class="progress"><b id="nDone">0</b> de <span id="nTotal">0</span></div>
+    <div class="progress"><b id="nDone">0</b> <span id="nOf">de 0</span></div>
+  </div>
+  <div class="banner" id="newHint" hidden>
+    Este aterro ainda não tem poços no EGF Lab. Em <b>Posições</b>, grave cada poço:
+    o número, o tipo e a posição. No fim, envie o Excel ao escritório, que cria os
+    poços e lhe manda um pacote novo. As leituras podem ser feitas logo a seguir.
   </div>
   <div class="tabs" role="group" aria-label="Modo">
     <button class="tab" id="tabRead" aria-pressed="true">Leituras</button>
@@ -186,6 +191,11 @@ ul.list li:first-child{border-top:0}
     </div>
 
     <div id="posForm" hidden>
+      <div class="chips" id="typeChips" role="group" aria-label="Tipo do poço novo" hidden>
+        <span class="lbl" style="margin:0;align-self:center">Tipo:</span>
+        <button class="chip" aria-pressed="false" data-type="Vertical">Vertical</button>
+        <button class="chip" aria-pressed="false" data-type="Horizontal">Horizontal</button>
+      </div>
       <div class="chips" id="posChips">
         <button class="chip" aria-pressed="false" data-note="Danificado">Danificado</button>
         <button class="chip" aria-pressed="false" data-note="Não encontrado">Não encontrado</button>
@@ -211,7 +221,7 @@ ul.list li:first-child{border-top:0}
     <p class="hint" id="exportHint"></p>
   </section>
 
-  <section class="card"><h2><span id="missTitle">Por ler</span> <small id="nMissing"></small></h2><div class="missing" id="missing"></div></section>
+  <section class="card" id="missCard"><h2><span id="missTitle">Por ler</span> <small id="nMissing"></small></h2><div class="missing" id="missing"></div></section>
 
   <section class="card" id="campsCard">
     <h2>Campanhas neste telemóvel</h2>
@@ -238,7 +248,7 @@ ul.list li:first-child{border-top:0}
 <script src="vendor/xlsx.full.min.js"></script>
 <script>
 'use strict';
-const APP_VERSION = '2026-10-13';
+const APP_VERSION = '2026-10-19';
 // Cabeçalho do Excel de leituras. A importação de leituras do EGF Lab reconhece
 // estes nomes sem mapear colunas (formato longo); o teste
 // tests/test_field_app_export.py lê esta linha e confirma-o.
@@ -247,6 +257,10 @@ const APP_VERSION = '2026-10-13';
 // e um "1466" escrito em vez de "146" ficava um poço novo no cadastro. Poços
 // novos entram pelas Posições.
 const READING_COLUMNS = ["ID","Data","CH4_pct","O2_pct","H2S_ppm","CO2_pct","Estado","Nota","GPS latitude","GPS longitude","GPS precisão (m)","Hora"];
+// Cabeçalho do Excel de posições, que entra em Biogás › Poços › Importar poços.
+// ID, Tipo, Latitude e Longitude são os que o palpite do mapeamento reconhece
+// (biogas_import.guess_well_mapping); tests/test_field_app_export.py confirma-o.
+const POSITION_COLUMNS = ["ID","Tipo","Latitude","Longitude","Precisão (m)","Altitude (m)","PT-TM06 X (m)","PT-TM06 Y (m)","Nº leituras","Origem","Nota","Data/hora","Latitude antiga","Longitude antiga","Distância ao registo antigo (m)"];
 const PACK_FORMAT = 'egflab-biogas-campo';
 const PACK_VERSION = 1;
 const LEGACY_KEY = 'pocos_palmela_v1';   // a primeira versão, só de Palmela
@@ -307,8 +321,11 @@ if (navigator.storage && navigator.storage.persist) navigator.storage.persist().
 let packs = {};        // id do aterro -> pacote
 let prefs = {};        // aterro escolhido, modo, avisos já vistos
 let inst = null;       // o pacote do aterro aberto
-let wells = [];        // os poços dele, por ordem natural
+let packWells = [];    // os poços que o pacote traz (os que o EGF Lab já tem)
+let packByKey = {};
+let wells = [];        // os do pacote mais os novos gravados aqui, por ordem natural
 let wellByKey = {};
+let newType = '';      // o tipo escolhido para um poço novo, nas Posições
 let positions = {};    // código -> posição gravada
 let campaigns = {};    // data -> {código -> leitura}
 let campDate = todayISO();
@@ -340,10 +357,24 @@ $('followBtn').onclick = () => { follow = !follow; $('followBtn').setAttribute('
 $('wellsBtn').onclick = () => { wellsOn = !wellsOn; $('wellsBtn').setAttribute('aria-pressed', wellsOn); wellsOn ? wellLayer.addTo(map) : map.removeLayer(wellLayer); };
 $('pickBtn').onclick = () => setPick(!picking);
 
+// Os poços que se conhecem: os do pacote e os novos, que só existem nas
+// Posições gravadas neste telemóvel. Um aterro novo começa sem nenhum do
+// pacote, e é assim que os poços nascem: gravados aqui, criados no EGF Lab
+// quando o escritório importar o Excel das posições.
+function mergeWells(){
+  const extra = Object.values(positions)
+    .filter(p => !packByKey[codeKey(p.code)])
+    .map(p => ({code: String(p.code), type: p.tipo || null, lat: p.lat, lon: p.lon, isNew: true}));
+  wells = packWells.concat(extra).sort((a, b) => natCmp(a.code, b.code));
+  wellByKey = {}; wells.forEach(w => wellByKey[codeKey(w.code)] = w);
+  buildWellLayer();
+}
 function buildWellLayer(){
   wellLayer.clearLayers(); wellMarkers = {};
   wells.forEach(w => {
     if (typeof w.lat !== 'number' || typeof w.lon !== 'number') return;
+    // Nas Posições, um poço novo já aparece a laranja (a posição gravada).
+    if (w.isNew && mode === 'posicoes') return;
     wellMarkers[w.code] = L.circleMarker([w.lat, w.lon], {radius:5, weight:1, color:'#000', fillColor:'#bdbdbd', fillOpacity:.9})
       .bindTooltip(String(w.code), {permanent:true, direction:'right', offset:[5,0], className:'lbl-old'})
       .on('click', () => { idEl.value = w.code; onIdChange(); })
@@ -373,7 +404,19 @@ function wellsBounds(){
   const pts = wells.filter(w => typeof w.lat === 'number').map(w => [w.lat, w.lon]);
   return pts.length ? L.latLngBounds(pts) : null;
 }
-function fitWells(){ const b = wellsBounds(); if (b) map.fitBounds(b, {padding:[20,20], maxZoom:18}); }
+// O centro do aterro: os poços, se os há; senão as coordenadas da instalação
+// que o pacote traz -- num aterro novo é o que põe o mapa no sítio.
+function siteCenter(){
+  const b = wellsBounds();
+  if (b) return b.getCenter();
+  const i = inst && inst.installation;
+  return i && typeof i.lat === 'number' && typeof i.lon === 'number' ? L.latLng(i.lat, i.lon) : null;
+}
+function fitWells(){
+  const b = wellsBounds();
+  if (b) { map.fitBounds(b, {padding:[20,20], maxZoom:18}); return; }
+  const c = siteCenter(); if (c) map.setView(c, 17);
+}
 function setPick(on){
   picking = on; document.body.classList.toggle('picking', on); $('pickBtn').setAttribute('aria-pressed', on);
   $('pickHint').hidden = !on; $('avgRow').hidden = on;
@@ -395,8 +438,8 @@ function onFix(p){
     meC = L.circle(ll, {radius:c.accuracy, color:'#2f8bff', weight:1, fillOpacity:.15, interactive:false}).addTo(map);
     meM = L.circleMarker(ll, {radius:7, weight:3, color:'#fff', fillColor:'#2f8bff', fillOpacity:1, interactive:false}).addTo(map);
     // Longe do aterro (no escritório, a caminho) o mapa fica no aterro.
-    const b = wellsBounds();
-    if (b && dist(ll[0], ll[1], b.getCenter().lat, b.getCenter().lng) > 3000) { follow = false; $('followBtn').setAttribute('aria-pressed','false'); }
+    const site = siteCenter();
+    if (site && dist(ll[0], ll[1], site.lat, site.lng) > 3000) { follow = false; $('followBtn').setAttribute('aria-pressed','false'); }
     else map.setView(ll, 19);
   } else {
     meM.setLatLng(ll); meC.setLatLng(ll).setRadius(c.accuracy);
@@ -418,7 +461,8 @@ if ('geolocation' in navigator) navigator.geolocation.watchPosition(onFix, onErr
 
 /* ---------- Escolher o poço ----------
    Os códigos são texto ("P-146" existe), por isso o + e o − andam pela lista
-   ordenada e não somam um ao número. */
+   ordenada e não somam um ao número -- excepto fora dela: sem lista (aterro
+   novo), ou num número para lá do fim nas Posições, contam 1, 2, 3… */
 const idEl = $('wid');
 function findWell(typed){
   const t = String(typed || '').trim(); if (!t) return null;
@@ -431,17 +475,33 @@ function nextMissing(from){
   const codes = wells.map(w => w.code), done = doneMap();
   const start = from == null ? -1 : codes.indexOf(from);
   for (let i = 1; i <= codes.length; i++) { const c = codes[(start + i + codes.length) % codes.length]; if (!done[c]) return c; }
+  // Nas Posições, com a lista toda feita, o seguinte é um poço novo.
+  if (mode === 'posicoes') return nextNew(from);
   return from || codes[0] || '';
 }
+// O número seguinte que ainda não é poço nenhum, nem do pacote nem gravado.
+function nextNew(from){
+  let n = /^\d+$/.test(String(from || '')) ? parseInt(from, 10) : 0;
+  do { n++; } while (wellByKey[String(n)]);
+  return String(n);
+}
 function step(dir){
-  const codes = wells.map(w => w.code); if (!codes.length) return;
-  const cur = curCode(); let i = codes.indexOf(cur);
+  const codes = wells.map(w => w.code), cur = curCode(), numeric = /^\d+$/.test(cur);
+  let i = codes.indexOf(cur);
+  if (!codes.length || (numeric && i < 0) || (numeric && mode === 'posicoes' && i >= 0 && i + dir >= codes.length)) {
+    idEl.value = String(Math.max(1, (numeric ? parseInt(cur, 10) : 0) + dir)); onIdChange(); return;
+  }
   if (i < 0) {   // escrito à mão e fora da lista: o vizinho pela ordem natural
     i = dir > 0 ? codes.findIndex(c => natCmp(c, cur) > 0) : codes.map(c => natCmp(c, cur) < 0).lastIndexOf(true);
     if (i < 0) i = dir > 0 ? 0 : codes.length - 1;
   } else i = Math.min(codes.length - 1, Math.max(0, i + dir));
   idEl.value = codes[i]; onIdChange();
 }
+function setType(t){
+  newType = t || '';
+  document.querySelectorAll('#typeChips .chip').forEach(c => c.setAttribute('aria-pressed', String(c.dataset.type === newType)));
+}
+document.querySelectorAll('#typeChips .chip').forEach(c => c.onclick = () => setType(c.dataset.type === newType ? '' : c.dataset.type));
 $('inc').onclick = () => step(1);
 $('dec').onclick = () => step(-1);
 idEl.addEventListener('input', onIdChange);
@@ -450,7 +510,14 @@ idEl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefaul
 
 function onIdChange(){
   if (mode === 'leituras') fillForm((campaigns[campDate] || {})[curCode()]);
-  else { document.querySelectorAll('#posChips .chip').forEach(c => c.setAttribute('aria-pressed','false')); $('note').value = ''; }
+  else {
+    document.querySelectorAll('#posChips .chip').forEach(c => c.setAttribute('aria-pressed','false')); $('note').value = '';
+    // O tipo só se pergunta a um poço que o EGF Lab ainda não tem; os do
+    // pacote já trazem o seu.
+    const code = curCode(), pw = packByKey[codeKey(code)];
+    $('typeChips').hidden = !code || !!pw;
+    setType(pw ? '' : ((positions[code] && positions[code].tipo) || ''));
+  }
   updateInfo(); updateButtons(); styleWells();
 }
 function nearestWell(){
@@ -462,9 +529,14 @@ function updateInfo(){
   const el = $('wellInfo'), code = curCode(), w = findWell(idEl.value);
   el.className = 'wellinfo'; el.replaceChildren();
   if (!code) { el.textContent = 'Escreva o número do poço'; $('lastInfo').textContent = ''; return; }
-  let t = w ? (w.type || 'Tipo por indicar')
-    : mode === 'leituras' ? 'Não está no pacote: a leitura grava-se, mas só entra no EGF Lab depois de o poço ser criado (em Posições).'
-    : 'Não está no pacote — fica como poço novo.';
+  let t;
+  if (w && w.isNew) t = mode === 'leituras'
+    ? 'Poço novo, gravado nas Posições. No escritório, importar primeiro as posições e só depois as leituras.'
+    : 'Poço novo: o EGF Lab cria-o quando o escritório importar as posições.';
+  else if (w) t = w.type || 'Tipo por indicar';
+  else t = mode === 'leituras'
+    ? 'Não está no pacote: grave primeiro a posição (em Posições), para o EGF Lab o poder criar.'
+    : 'Poço novo: o EGF Lab cria-o quando o escritório importar as posições.';
   const done = doneMap()[code];
   if (done) {
     el.className = 'wellinfo dup';
@@ -650,11 +722,14 @@ $('recBtn').onclick = async () => {
   savePos(code, pos, 'GPS');
 };
 async function savePos(code, pos, src){
+  const pw = packByKey[codeKey(code)];
   positions[code] = {code, lat:+pos.lat.toFixed(7), lon:+pos.lon.toFixed(7),
     acc: pos.acc != null ? Math.round(pos.acc * 10) / 10 : null,
     alt: pos.alt != null ? Math.round(pos.alt * 10) / 10 : null,
-    n: pos.n, src, note: $('note').value.trim(), savedAt: new Date().toISOString()};
+    n: pos.n, src, note: $('note').value.trim(), savedAt: new Date().toISOString(),
+    tipo: pw ? '' : newType};
   await persist('pos');
+  mergeWells();
   toast(`Poço ${code} gravado` + (pos.acc != null ? ` (±${Math.round(pos.acc)} m)` : ' a partir do mapa'));
   if (navigator.vibrate) navigator.vibrate(60);
   idEl.value = nextMissing(code); onIdChange(); render();
@@ -663,9 +738,18 @@ async function savePos(code, pos, src){
 /* ---------- Listas ---------- */
 function render(){
   if (!inst) return;
-  const done = doneMap();
-  $('nDone').textContent = wells.filter(w => done[w.code]).length;
-  $('nTotal').textContent = wells.length;
+  const done = doneMap(), fresh = !packWells.length && mode === 'posicoes';
+  // Num aterro novo, nas Posições, não há "de quantos": conta-se o que se gravou.
+  $('nDone').textContent = fresh ? Object.keys(positions).length : wells.filter(w => done[w.code]).length;
+  $('nOf').textContent = fresh ? 'gravados' : 'de ' + wells.length;
+  $('missCard').hidden = fresh || !wells.length;
+  if (mode === 'leituras') {
+    const novos = Object.keys(campaigns[campDate] || {}).filter(c => !packByKey[codeKey(c)]).length;
+    $('exportHint').textContent = 'Envie o Excel ao escritório: entra no EGF Lab em Biogás › Importar leituras, sem mapear colunas. As leituras ficam neste telemóvel até apagar a campanha.'
+      + (novos ? ` Atenção: ${novos} ${novos === 1 ? 'poço é novo' : 'poços são novos'} — o escritório tem de importar primeiro o Excel das Posições.` : '');
+  } else {
+    $('exportHint').textContent = 'Envie o Excel ao escritório: entra no EGF Lab em Biogás › Poços › Importar poços. As posições ficam neste telemóvel até remover o aterro.';
+  }
   const ids = Object.keys(done).sort((a, b) => (done[b].savedAt || '').localeCompare(done[a].savedAt || ''));
   $('emptyMsg').hidden = ids.length > 0;
   $('emptyMsg').textContent = mode === 'leituras' ? 'Ainda nada lido nesta campanha.' : 'Ainda nenhuma posição gravada.';
@@ -696,7 +780,9 @@ function render(){
       if (!confirm(`Apagar ${mode === 'leituras' ? 'a leitura' : 'a posição'} do poço ${code}?`)) return;
       delete done[code];
       if (mode === 'leituras' && !Object.keys(done).length) delete campaigns[campDate];
-      await persist(mode === 'leituras' ? 'read' : 'pos'); onIdChange(); render();
+      await persist(mode === 'leituras' ? 'read' : 'pos');
+      if (mode === 'posicoes') mergeWells();   // um poço novo sem posição deixa de existir
+      onIdChange(); render();
     };
     li.append(lid, meta, del); ul.appendChild(li);
   });
@@ -745,14 +831,14 @@ function readingRows(){
   ]; });
 }
 function positionRows(){
-  const head = ['ID','Tipo','Latitude','Longitude','Precisão (m)','Altitude (m)','PT-TM06 X (m)','PT-TM06 Y (m)','Nº leituras','Origem','Nota','Data/hora','Latitude antiga','Longitude antiga','Distância ao registo antigo (m)'];
   const rows = Object.keys(positions).sort(natCmp).map(code => {
-    const r = positions[code], w = findWell(code), [x, y] = tm06(r.lat, r.lon);
-    const old = w && typeof w.lat === 'number';
-    return [idCell(code), w ? (w.type || '') : '', r.lat, r.lon, r.acc, r.alt, x, y, r.n, r.src === 'Map' ? 'Mapa' : 'GPS', r.note || '',
-      new Date(r.savedAt).toLocaleString('pt-PT'), old ? w.lat : '', old ? w.lon : '', old ? Math.round(dist(w.lat, w.lon, r.lat, r.lon)) : ''];
+    // As coordenadas "antigas" só do pacote: num poço novo não há antigas.
+    const r = positions[code], pw = packByKey[codeKey(code)], [x, y] = tm06(r.lat, r.lon);
+    const old = pw && typeof pw.lat === 'number';
+    return [idCell(code), r.tipo || (pw && pw.type) || '', r.lat, r.lon, r.acc, r.alt, x, y, r.n, r.src === 'Map' ? 'Mapa' : 'GPS', r.note || '',
+      new Date(r.savedAt).toLocaleString('pt-PT'), old ? pw.lat : '', old ? pw.lon : '', old ? Math.round(dist(pw.lat, pw.lon, r.lat, r.lon)) : ''];
   });
-  return [head, rows];
+  return [POSITION_COLUMNS, rows];
 }
 function exportData(){
   return mode === 'leituras' ? [READING_COLUMNS, readingRows()] : positionRows();
@@ -800,10 +886,8 @@ function setMode(m){
   $('pickBtn').hidden = r; if (r && picking) setPick(false);
   $('listTitle').textContent = r ? 'Lidos nesta campanha' : 'Posições gravadas';
   $('missTitle').textContent = r ? 'Por ler' : 'Sem posição';
-  $('exportHint').textContent = r
-    ? 'Envie o Excel ao escritório: entra no EGF Lab em Biogás › Importar leituras, sem mapear colunas. As leituras ficam neste telemóvel até apagar a campanha.'
-    : 'Envie o Excel ao escritório: entra no EGF Lab em Biogás › Poços › Importar poços. As posições ficam neste telemóvel até remover o aterro.';
   setTimeout(() => map.invalidateSize(), 50);
+  buildWellLayer();
   onIdChange(); render();
 }
 $('tabRead').onclick = () => setMode('leituras');
@@ -813,19 +897,24 @@ $('tabPos').onclick = () => setMode('posicoes');
 function validPack(p){ return p && p.format === PACK_FORMAT && p.installation && p.installation.id != null && Array.isArray(p.wells); }
 async function selectInst(id){
   inst = packs[id]; prefs.instId = id; savePrefs();
-  wells = inst.wells.filter(w => w && w.code != null).map(w => ({...w, code: String(w.code)})).sort((a, b) => natCmp(a.code, b.code));
-  wellByKey = {}; wells.forEach(w => wellByKey[codeKey(w.code)] = w);
+  packWells = inst.wells.filter(w => w && w.code != null).map(w => ({...w, code: String(w.code)})).sort((a, b) => natCmp(a.code, b.code));
+  packByKey = {}; packWells.forEach(w => packByKey[codeKey(w.code)] = w);
   positions = (await store.get('pos:' + id)) || {};
   campaigns = (await store.get('read:' + id)) || {};
+  mergeWells();
   campDate = todayISO(); $('campDate').value = campDate; $('campDate').max = todayISO();
-  idEl.inputMode = wells.length && wells.every(w => /^\d+$/.test(w.code)) ? 'numeric' : 'text';
+  // Num aterro novo os poços vão ser numerados: teclado numérico.
+  idEl.inputMode = packWells.every(w => /^\d+$/.test(w.code)) ? 'numeric' : 'text';
+  // Sem poço nenhum, o que há a fazer é gravá-los: abre nas Posições.
+  if (!wells.length) mode = 'posicoes';
+  $('newHint').hidden = packWells.length > 0;
   const sel = $('instSel'); sel.replaceChildren();
   Object.values(packs).sort((a, b) => natCmp(a.installation.name, b.installation.name)).forEach(p => {
     const o = document.createElement('option'); o.value = String(p.installation.id); o.textContent = p.installation.name; sel.appendChild(o); });
   sel.value = id;
   const i = inst.installation;
-  $('packInfo').textContent = `${i.company ? i.company + ' · ' : ''}${i.municipality || ''} · ${wells.length} poços · pacote de ${dateFmt(inst.generatedAt)}`;
-  buildWellLayer(); buildStatusChips(); fitWells();
+  $('packInfo').textContent = `${i.company ? i.company + ' · ' : ''}${i.municipality || ''} · ${packWells.length ? packWells.length + ' poços' : 'sem poços no EGF Lab'} · pacote de ${dateFmt(inst.generatedAt)}`;
+  buildStatusChips(); fitWells();
   $('setup').hidden = true; $('work').hidden = false;
   setMode(mode);
   idEl.value = nextMissing(null); onIdChange(); render();
@@ -833,7 +922,7 @@ async function selectInst(id){
 }
 $('instSel').addEventListener('change', e => selectInst(e.target.value).then(maybeMigrateLegacy));
 function showSetup(){
-  inst = null; wells = []; wellByKey = {}; wellLayer.clearLayers(); recLayer.clearLayers();
+  inst = null; wells = []; wellByKey = {}; packWells = []; packByKey = {}; wellLayer.clearLayers(); recLayer.clearLayers();
   $('setup').hidden = false; $('work').hidden = true;
 }
 document.querySelectorAll('[data-load]').forEach(b => b.onclick = () => $('packFile').click());
@@ -853,7 +942,9 @@ $('packFile').addEventListener('change', async e => {
     const last = loaded[loaded.length - 1];
     await selectInst(String(last.installation.id));
     await maybeMigrateLegacy();
-    toast(loaded.length === 1 ? `${last.installation.name}: ${last.wells.length} poços carregados` : `${loaded.length} aterros carregados`);
+    toast(loaded.length > 1 ? `${loaded.length} aterros carregados`
+      : last.wells.length ? `${last.installation.name}: ${last.wells.length} poços carregados`
+      : `${last.installation.name}: ainda sem poços — grave-os em Posições`);
   }
   if (bad.length) setTimeout(() => alert(bad.join('\n')), loaded.length ? 400 : 0);
 });
@@ -884,7 +975,7 @@ async function maybeMigrateLegacy(){
       positions[id] = {code:id, lat:r.lat, lon:r.lon, acc:r.acc, alt:r.alt, n:r.n, src:r.src, note:r.note || '', savedAt:r.savedAt};
       added++;
     });
-    await persist('pos'); render();
+    await persist('pos'); mergeWells(); render();
     toast(`${added} posições juntas a ${inst.installation.name}`);
   }
   prefs.legacyDone = true; savePrefs();
