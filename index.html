@@ -21,7 +21,7 @@
   Excel e volta ao EGF Lab pela importação normal.
 
   Dois modos sobre a mesma escolha de poço:
-    Leituras  -- CH4, CO2, O2, H2S, caudal (opcional), estado e nota por
+    Leituras  -- CH4, CO2, O2, H2S, caudal, depressão, estado e nota por
                  poço, numa campanha (aterro + data). O Excel tem as colunas de READING_COLUMNS,
                  que a importação de leituras do EGF Lab reconhece sem mapear.
                  O teste tests/test_field_app_export.py lê essa linha daqui.
@@ -79,7 +79,6 @@ label.lbl{display:block;font-weight:600;font-size:14px;margin-bottom:6px}
 .meas input{font:700 30px "Barlow Condensed","Arial Narrow",sans-serif;text-align:center;width:100%;min-width:0;padding:5px 4px;border:2px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
 .meas input:focus{border-color:var(--hivis);outline:none}
 .meas input.bad{border-color:var(--bad);color:var(--bad)}
-.meas label.wide{grid-column:1/-1}
 .checks{margin-top:10px;font-size:14px;display:flex;flex-direction:column;gap:5px;align-items:flex-start}
 .checks:empty{display:none}
 .bal{font-weight:600;padding:4px 10px;border-radius:999px;background:var(--chip);border:1.5px solid currentColor}
@@ -184,7 +183,8 @@ ul.list li:first-child{border-top:0}
         <label><span>CO₂ <span class="u">% vol</span></span><input id="co2" type="text" inputmode="decimal" autocomplete="off" enterkeyhint="next"></label>
         <label><span>O₂ <span class="u">% vol</span></span><input id="o2" type="text" inputmode="decimal" autocomplete="off" enterkeyhint="next"></label>
         <label><span>H₂S <span class="u">ppm</span></span><input id="h2s" type="text" inputmode="decimal" autocomplete="off" enterkeyhint="next"></label>
-        <label class="wide"><span>Caudal <span class="u">m³/h · opcional</span></span><input id="flow" type="text" inputmode="decimal" autocomplete="off" enterkeyhint="done"></label>
+        <label><span>Caudal <span class="u">m³/h</span></span><input id="flow" type="text" inputmode="decimal" autocomplete="off" enterkeyhint="next"></label>
+        <label><span>Depressão <span class="u">mbar</span></span><input id="suction" type="text" inputmode="decimal" autocomplete="off" enterkeyhint="done"></label>
       </div>
       <div class="checks" id="checks" aria-live="polite"></div>
       <div class="chips" id="statusChips" role="group" aria-label="Estado"></div>
@@ -250,7 +250,7 @@ ul.list li:first-child{border-top:0}
 <script src="vendor/xlsx.full.min.js"></script>
 <script>
 'use strict';
-const APP_VERSION = '2026-10-21';
+const APP_VERSION = '2026-10-22';
 // Cabeçalho do Excel de leituras. A importação de leituras do EGF Lab reconhece
 // estes nomes sem mapear colunas (formato longo); o teste
 // tests/test_field_app_export.py lê esta linha e confirma-o.
@@ -258,7 +258,7 @@ const APP_VERSION = '2026-10-21';
 // com "Latitude"/"Longitude" um poço que não existe no EGF Lab era criado ali,
 // e um "1466" escrito em vez de "146" ficava um poço novo no cadastro. Poços
 // novos entram pelas Posições.
-const READING_COLUMNS = ["ID","Data","CH4_pct","O2_pct","H2S_ppm","CO2_pct","Caudal m3/h","Estado","Nota","GPS latitude","GPS longitude","GPS precisão (m)","Hora"];
+const READING_COLUMNS = ["ID","Data","CH4_pct","O2_pct","H2S_ppm","CO2_pct","Caudal m3/h","Depressão mbar","Estado","Nota","GPS latitude","GPS longitude","GPS precisão (m)","Hora"];
 // Cabeçalho do Excel de posições, que entra em Biogás › Poços › Importar poços.
 // ID, Tipo, Latitude e Longitude são os que o palpite do mapeamento reconhece
 // (biogas_import.guess_well_mapping); tests/test_field_app_export.py confirma-o.
@@ -274,6 +274,7 @@ const MEAS = [
   {id:'o2',  label:'O₂',  unit:'%'},
   {id:'h2s', label:'H₂S', unit:'ppm'},
   {id:'flow', label:'Caudal', unit:'m³/h'},
+  {id:'suction', label:'Depressão', unit:'mbar'},
 ];
 
 const $ = id => document.getElementById(id);
@@ -560,7 +561,8 @@ function updateInfo(){
     const last = inst && inst.lastReadings ? inst.lastReadings[w ? w.code : code] : null;
     $('lastInfo').textContent = last
       ? `Última leitura · ${dateFmt(last.date)}: CH₄ ${numFmt(last.ch4)} · CO₂ ${numFmt(last.co2)} · O₂ ${numFmt(last.o2)} · H₂S ${numFmt(last.h2s)}`
-        + (last.flow != null ? ` · Caudal ${numFmt(last.flow)} m³/h` : '') + (last.status && last.status !== 'OK' ? ` · ${last.status}` : '')
+        + (last.flow != null ? ` · Caudal ${numFmt(last.flow)} m³/h` : '')
+        + (last.suction != null ? ` · Depressão ${numFmt(last.suction)} mbar` : '') + (last.status && last.status !== 'OK' ? ` · ${last.status}` : '')
       : (w ? 'Sem leituras anteriores no pacote.' : '');
   }
 }
@@ -615,6 +617,8 @@ function evaluate(v, last){
   if (ok(v.h2s) && v.h2s < 0) { hard.push('H₂S negativo'); badIds.add('h2s'); }
   if (ok(v.h2s) && v.h2s > 10000) { hard.push('H₂S acima de 10 000 ppm'); badIds.add('h2s'); }
   if (ok(v.flow) && v.flow < 0) { hard.push('Caudal negativo'); badIds.add('flow'); }
+  // A depressão não se verifica pelo sinal: há quem a escreva positiva e quem
+  // a escreva como pressão relativa, negativa, e grava-se como foi escrita.
   let balance = null;
   if (ok(v.ch4) && ok(v.co2) && ok(v.o2)) {
     const sum = v.ch4 + v.co2 + v.o2;
@@ -672,7 +676,7 @@ $('saveReading').onclick = async () => {
   const g = fix && Date.now() - fix.t < 60000 ? fix : null;
   const camp = campaigns[campDate] || (campaigns[campDate] = {});
   camp[code] = {
-    code, ch4: v.ch4, co2: v.co2, o2: v.o2, h2s: v.h2s, flow: v.flow, status,
+    code, ch4: v.ch4, co2: v.co2, o2: v.o2, h2s: v.h2s, flow: v.flow, suction: v.suction, status,
     note: $('rNote').value.trim(),
     lat: g ? +g.lat.toFixed(7) : null, lon: g ? +g.lon.toFixed(7) : null,
     acc: g ? Math.round(g.acc * 10) / 10 : null,
@@ -831,7 +835,7 @@ const idCell = c => /^\d+$/.test(c) && String(Number(c)) === c ? Number(c) : c;
 function readingRows(){
   const camp = campaigns[campDate] || {};
   return Object.keys(camp).sort(natCmp).map(code => { const r = camp[code]; return [
-    idCell(code), campDate, r.ch4, r.o2, r.h2s, r.co2, r.flow, r.status, r.note || '',
+    idCell(code), campDate, r.ch4, r.o2, r.h2s, r.co2, r.flow, r.suction, r.status, r.note || '',
     r.lat, r.lon, r.acc, new Date(r.savedAt).toLocaleTimeString('pt-PT', {hour:'2-digit', minute:'2-digit'}),
   ]; });
 }
