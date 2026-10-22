@@ -171,7 +171,7 @@ ul.list li:first-child{border-top:0}
     <label class="lbl" for="wid">Poço</label>
     <div class="idrow">
       <button class="step" id="dec" aria-label="Poço anterior">−</button>
-      <input id="wid" type="text" inputmode="numeric" autocomplete="off" enterkeyhint="next">
+      <input id="wid" type="text" inputmode="text" autocapitalize="characters" autocorrect="off" spellcheck="false" autocomplete="off" enterkeyhint="next">
       <button class="step" id="inc" aria-label="Poço seguinte">+</button>
     </div>
     <div class="wellinfo" id="wellInfo"></div>
@@ -895,6 +895,9 @@ function setMode(m){
   $('pickBtn').hidden = r; if (r && picking) setPick(false);
   $('listTitle').textContent = r ? 'Lidos nesta campanha' : 'Posições gravadas';
   $('missTitle').textContent = r ? 'Por ler' : 'Sem posição';
+  // Nas Posições o código de um poço novo pode ter letras ("P-146"): teclado
+  // completo. Nas Leituras, numérico só se todos os poços forem números.
+  idEl.inputMode = r && wells.every(w => /^\d+$/.test(w.code)) ? 'numeric' : 'text';
   setTimeout(() => map.invalidateSize(), 50);
   buildWellLayer();
   onIdChange(); render();
@@ -912,8 +915,6 @@ async function selectInst(id){
   campaigns = (await store.get('read:' + id)) || {};
   mergeWells();
   campDate = todayISO(); $('campDate').value = campDate; $('campDate').max = todayISO();
-  // Num aterro novo os poços vão ser numerados: teclado numérico.
-  idEl.inputMode = packWells.every(w => /^\d+$/.test(w.code)) ? 'numeric' : 'text';
   // Sem poço nenhum, o que há a fazer é gravá-los: abre nas Posições.
   if (!wells.length) mode = 'posicoes';
   $('newHint').hidden = packWells.length > 0;
