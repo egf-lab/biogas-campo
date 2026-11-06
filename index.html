@@ -117,6 +117,12 @@ ul.list li:first-child{border-top:0}
 .del{background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;padding:4px 8px}
 .empty{color:var(--muted);font-size:14px;margin:4px 0}
 .exportrow{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+/* Enviar é o fim da ronda: o botão maior do ecrã, verde para não se
+   confundir com o laranja de Gravar. O Excel fica por baixo, discreto. */
+.sendbig{display:block;width:100%;margin-top:14px;padding:18px 12px;font:700 23px "Barlow Condensed","Arial Narrow",sans-serif;background:var(--good);color:var(--card);border:none;border-radius:10px;cursor:pointer}
+.sendbig:before{content:"↑ "}
+.sendbig:disabled{opacity:.45;cursor:not-allowed}
+.sendbig + .exportrow .btn{font-size:14px;padding:7px 12px}
 .missing{display:flex;flex-wrap:wrap;gap:6px}
 .mcode{min-width:40px;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--chip);color:var(--ink);font:600 15px "Barlow Condensed","Arial Narrow",sans-serif;cursor:pointer}
 .missnone{color:var(--muted);font-size:14px}
@@ -236,11 +242,9 @@ ul.list li:first-child{border-top:0}
     <h2><span id="listTitle">Lidos nesta campanha</span> <small>gravado neste telemóvel</small></h2>
     <ul class="list" id="list"></ul>
     <p class="empty" id="emptyMsg"></p>
+    <button class="sendbig" id="sendBtn" hidden><span id="sendLabel">Enviar para o EGF Lab</span></button>
     <div class="exportrow">
-      <button class="btn primary" id="sendBtn" hidden>Enviar para o EGF Lab</button>
       <button class="btn primary" id="xlsxBtn">Descarregar Excel</button>
-      <button class="btn" id="csvBtn">Descarregar CSV</button>
-      <button class="btn" id="copyBtn">Copiar tabela</button>
     </div>
     <p class="hint" id="exportHint"></p>
     <ul class="outbox" id="outbox" aria-live="polite"></ul>
@@ -275,7 +279,7 @@ ul.list li:first-child{border-top:0}
 <script src="vendor/xlsx.full.min.js"></script>
 <script>
 'use strict';
-const APP_VERSION = '2026-11-06.4';
+const APP_VERSION = '2026-11-06.5';
 // Cabeçalho do Excel de leituras. A importação de leituras do EGF Lab reconhece
 // estes nomes sem mapear colunas (formato longo); o teste
 // tests/test_field_app_export.py lê esta linha e confirma-o.
@@ -822,6 +826,16 @@ function render(){
   $('sendBtn').hidden = !linked;
   $('xlsxBtn').classList.toggle('primary', !linked);
   if (linked) {
+    // O botão diz o que vai enviar: as leituras desta campanha, ou as
+    // posições que o EGF Lab ainda não tem.
+    const n = mode === 'leituras' ? Object.keys(campaigns[campDate] || {}).length
+      : Object.values(positions).filter(phoneOwns).length;
+    $('sendBtn').disabled = !n;
+    $('sendLabel').textContent = !n ? (mode === 'leituras' ? 'Nada lido para enviar' : 'Nenhuma posição nova para enviar')
+      : mode === 'leituras' ? `Enviar ${n} leitura${n === 1 ? '' : 's'} para o EGF Lab`
+      : `Enviar ${n} ${n === 1 ? 'posição' : 'posições'} para o EGF Lab`;
+  }
+  if (linked) {
     $('exportHint').textContent = mode === 'leituras'
       ? 'No fim da ronda, carregue em Enviar: as leituras entram no EGF Lab sozinhas, em cerca de um minuto (das 05:00 às 22:00). Sem rede, o envio fica na fila e segue quando houver. As leituras ficam neste telemóvel até apagar a campanha.'
       : 'Enviar manda as posições ao EGF Lab: os poços novos são criados logo; uma posição nova de um poço que já existe fica à espera do escritório.';
@@ -941,7 +955,7 @@ function fileBase(){
 function dl(blob, name){ const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); }
 $('xlsxBtn').onclick = () => {
   const [head, rows] = exportData(); if (!rows.length) return toast('Ainda nada para exportar');
-  if (!window.XLSX) return toast('A biblioteca do Excel não carregou — use o CSV');
+  if (!window.XLSX) return toast('A biblioteca do Excel não carregou — abra a aplicação outra vez com rede');
   const ws = XLSX.utils.aoa_to_sheet([head, ...rows.map(r => r.map((v, i) => mode === 'leituras' && i === 1 ? excelDate(v) : v))]);
   if (mode === 'leituras') {
     // A coluna Data como data do Excel, e não texto: abre como data e a
@@ -952,18 +966,6 @@ $('xlsxBtn').onclick = () => {
   ws['!cols'] = head.map(k => ({wch: Math.max(9, k.length + 2)}));
   const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, mode === 'leituras' ? 'Leituras' : 'Coordenadas');
   dl(new Blob([XLSX.write(wb, {bookType:'xlsx', type:'array'})], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}), fileBase() + '.xlsx');
-};
-$('csvBtn').onclick = () => {
-  const [head, rows] = exportData(); if (!rows.length) return toast('Ainda nada para exportar');
-  const cell = (v, i) => { if (v == null) return ''; if (mode === 'leituras' && i === 1) return dateFmt(v);
-    return typeof v === 'number' ? String(v).replace('.', ',') : '"' + String(v).replace(/"/g, '""') + '"'; };
-  const csv = '\ufeff' + [head.join(';'), ...rows.map(r => r.map(cell).join(';'))].join('\r\n');
-  dl(new Blob([csv], {type:'text/csv'}), fileBase() + '.csv');
-};
-$('copyBtn').onclick = async () => {
-  const [head, rows] = exportData(); if (!rows.length) return toast('Ainda nada para copiar');
-  const tsv = [head.join('\t'), ...rows.map(r => r.map((v, i) => v == null ? '' : (mode === 'leituras' && i === 1 ? dateFmt(v) : v)).join('\t'))].join('\n');
-  try { await navigator.clipboard.writeText(tsv); toast('Copiado — cole no Excel'); } catch (e) { toast('Não foi possível copiar — use Descarregar'); }
 };
 
 /* ---------- Modo ---------- */
