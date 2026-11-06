@@ -8,7 +8,10 @@ telemóvel nunca chega à rede da empresa. Há dois caminhos.
 na conta de armazenamento do Azure, que o telemóvel alcança pela internet:
 
     EGF Lab ── pacote.json ──▶ caixa do aterro ◀── envios (Enviar) ── telemóvel
-            ◀── recolha (cron, 10 em 10 min) ──┘ ── resultado/<id>.json ──▶
+            ◀── recolha (serviço, de minuto a minuto) ──┘ ── resultado/<id>.json ──▶
+
+Das 22:00 às 05:00 (hora de Lisboa) não há consultas automáticas em nenhum
+sentido; o horário vem no pacote (`schedule`). Ver `biogas_field_service.py`.
 
 O telemóvel liga-se ao aterro pelo código QR de Biogás › Aplicação de campo
 (`#ligar=...` no endereço, ou Colar ligação). O lado do EGF Lab está em

@@ -275,7 +275,7 @@ ul.list li:first-child{border-top:0}
 <script src="vendor/xlsx.full.min.js"></script>
 <script>
 'use strict';
-const APP_VERSION = '2026-11-06.3';
+const APP_VERSION = '2026-11-06.4';
 // Cabeçalho do Excel de leituras. A importação de leituras do EGF Lab reconhece
 // estes nomes sem mapear colunas (formato longo); o teste
 // tests/test_field_app_export.py lê esta linha e confirma-o.
@@ -300,9 +300,14 @@ const EVENT_KINDS = ['ligacao', 'desligacao'];
 const FAR_FROM_SITE_M = 2000;
 // De quanto em quanto tempo, com a aplicação aberta, se tenta outra vez: um
 // envio por enviar (sem rede) e um resultado por chegar (o EGF Lab recolhe de
-// 10 em 10 minutos). O evento "online" do navegador nem sempre chega.
+// minuto a minuto). O evento "online" do navegador nem sempre chega.
 const RETRY_SEND_MS = 20000;
-const POLL_RESULT_MS = 60000;
+const POLL_RESULT_MS = 15000;
+// O silêncio: das 22:00 às 05:00 (hora de Lisboa) a aplicação não faz nada
+// por si -- nem tentativas, nem resultados, nem pacotes. O que o operador
+// pede (Enviar, ler um código) faz-se na mesma. O horário vem no pacote, e é
+// o EGF Lab que o define; este é só o de quem ainda não tem pacote.
+const DEFAULT_SCHEDULE = {quiet: ['22:00', '05:00'], timeZone: 'Europe/Lisbon'};
 const LEGACY_KEY = 'pocos_palmela_v1';   // a primeira versão, só de Palmela
 const POS_NOTES = ['Danificado','Não encontrado','Tapado','Poço novo'];
 const DEFAULT_STATUSES = ['OK','Danificado','Sem acesso'];
@@ -818,7 +823,7 @@ function render(){
   $('xlsxBtn').classList.toggle('primary', !linked);
   if (linked) {
     $('exportHint').textContent = mode === 'leituras'
-      ? 'No fim da ronda, carregue em Enviar: as leituras entram no EGF Lab sozinhas, em poucos minutos. Sem rede, o envio fica na fila e segue quando houver. As leituras ficam neste telemóvel até apagar a campanha.'
+      ? 'No fim da ronda, carregue em Enviar: as leituras entram no EGF Lab sozinhas, em cerca de um minuto (das 05:00 às 22:00). Sem rede, o envio fica na fila e segue quando houver. As leituras ficam neste telemóvel até apagar a campanha.'
       : 'Enviar manda as posições ao EGF Lab: os poços novos são criados logo; uma posição nova de um poço que já existe fica à espera do escritório.';
   } else if (mode === 'leituras') {
     const novos = Object.keys(campaigns[campDate] || {}).filter(c => !packByKey[codeKey(c)]).length;
@@ -986,6 +991,7 @@ $('tabPos').onclick = () => setMode('posicoes');
 function validPack(p){ return p && p.format === PACK_FORMAT && p.installation && p.installation.id != null && Array.isArray(p.wells); }
 function usePack(p){
   inst = p;
+  if (p && p.schedule) { prefs.schedule = p.schedule; savePrefs(); }
   packWells = inst.wells.filter(w => w && w.code != null).map(w => ({...w, code: String(w.code)})).sort((a, b) => natCmp(a.code, b.code));
   packByKey = {}; packWells.forEach(w => packByKey[codeKey(w.code)] = w);
 }
@@ -1062,7 +1068,7 @@ $('removeInst').onclick = async () => {
   if (prefs.reg) { delete prefs.reg[id]; savePrefs(); }
   outbox = outbox.filter(o => o.inst !== id || o.kind === 'desligacao');
   await store.set('packs', packs); await store.set('links', links); await saveOutbox();
-  flushOutbox();
+  flushOutbox(true);   // pedido pelo operador: segue mesmo no silêncio
   await store.del('pos:' + id); await store.del('read:' + id);
   const ids = Object.keys(packs);
   if (ids.length) await selectInst(ids[0]); else showSetup();
@@ -1127,7 +1133,7 @@ async function useLink(d){
   if (await refreshPack(id)) { await selectInst(id); toast(`${name}: ligado ao EGF Lab`); }
   else if (packs[id]) { await selectInst(id); toast(`${name}: ligado. O pacote atualiza quando houver rede.`); }
   else toast(`Ligação a ${name} guardada. O aterro carrega quando houver rede.`);
-  flushOutbox();
+  flushOutbox(true);   // o operador acabou de ler o código: é dele, não automático
   return id;
 }
 async function takeLinkFromAddress(){
@@ -1179,7 +1185,31 @@ async function refreshPack(id){
   }
   return true;
 }
-async function refreshPacks(){ for (const id of Object.keys(links)) await refreshPack(id); }
+async function refreshPacks(){
+  if (quietNow()) return;
+  for (const id of Object.keys(links)) await refreshPack(id);
+}
+
+/* ---------- Silêncio ---------- */
+const schedule = () => prefs.schedule || DEFAULT_SCHEDULE;
+const hm = s => { const [h, m] = String(s).split(':').map(Number); return h * 60 + m; };
+function lisbonMinutes(d){
+  const parts = new Intl.DateTimeFormat('en-GB', {timeZone: schedule().timeZone || 'Europe/Lisbon',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23'}).formatToParts(d || new Date());
+  return (+parts.find(p => p.type === 'hour').value % 24) * 60 + +parts.find(p => p.type === 'minute').value;
+}
+function quietNow(d){
+  const q = schedule().quiet; if (!q) return false;
+  const t = lisbonMinutes(d), s = hm(q[0]), e = hm(q[1]);
+  return s <= e ? (t >= s && t < e) : (t >= s || t < e);
+}
+function msUntilQuietEnds(){
+  if (!quietNow()) return 0;
+  let mins = hm(schedule().quiet[1]) - lisbonMinutes();
+  if (mins <= 0) mins += 1440;
+  return mins * 60000 - new Date().getSeconds() * 1000;
+}
+const quietEnd = () => (schedule().quiet || [])[1] || '05:00';
 
 const saveOutbox = () => store.set('outbox', outbox).catch(() => toast('Não foi possível gravar a fila de envios'));
 const newId = () => (crypto.randomUUID ? crypto.randomUUID()
@@ -1288,9 +1318,11 @@ $('sendBtn').onclick = async () => {
     posKeys: pos.map(p => [p.code, p.savedAt])});
   await saveOutbox(); renderOutbox();
   if (navigator.vibrate) navigator.vibrate(60);
-  await flushOutbox();
+  await flushOutbox(true);   // o operador carregou em Enviar: segue mesmo no silêncio
   const o = outbox.find(x => x.id === uid);
-  toast(o && o.state === 'porEnviar' ? 'Sem rede: o envio fica na fila e segue sozinho' : 'Enviado. O EGF Lab importa em poucos minutos.');
+  toast(o && o.state === 'porEnviar'
+    ? (quietNow() ? `Sem rede: carregue outra vez em Enviar, ou segue sozinho a partir das ${quietEnd()}` : 'Sem rede: o envio fica na fila e segue sozinho')
+    : (quietNow() ? `Enviado. O EGF Lab importa a partir das ${quietEnd()}.` : 'Enviado. O EGF Lab importa em cerca de um minuto.'));
 };
 async function blobExists(l, id){
   for (const folder of ['recebido/', 'processado/']) {
@@ -1299,8 +1331,12 @@ async function blobExists(l, id){
   return false;
 }
 let flushing = false;
-async function flushOutbox(){
-  if (flushing || !outbox.length) return;
+// manual: pedido pelo operador (Enviar, ler um código, remover o aterro).
+// No silêncio só isso corre, e só para pôr na caixa o que ele pediu: não se
+// vai buscar resultados nem pacotes.
+async function flushOutbox(manual){
+  const quiet = quietNow();
+  if (flushing || !outbox.length || (quiet && !manual)) { scheduleSync(); return; }
   flushing = true;
   const imported = new Set();
   let accepted = false;
@@ -1328,7 +1364,7 @@ async function flushOutbox(){
         o.lastError = st === 403 ? 'O EGF Lab recusou a ligação deste aterro (foi trocada?). Peça o código novo ao escritório.' : `O EGF Lab respondeu ${st}; tenta outra vez sozinho.`;
       }
     }
-    for (const o of outbox.filter(o => o.state === 'enviado')) {
+    for (const o of outbox.filter(o => !quiet && o.state === 'enviado')) {
       const l = links[o.inst]; if (!l) continue;
       try {
         const r = await fetch(linkUrl(l, `resultado/${o.id}.json`), {cache: 'no-store'});
@@ -1355,17 +1391,24 @@ async function flushOutbox(){
 }
 function scheduleSync(){
   clearTimeout(scheduleSync.t);
-  const waiting = outbox.some(o => o.state === 'porEnviar') ? RETRY_SEND_MS
+  const pending = outbox.some(o => o.state === 'porEnviar' || o.state === 'enviado');
+  // No silêncio, a próxima tentativa é quando ele acaba (com a aplicação
+  // aberta); fechada, é na abertura seguinte.
+  const waiting = quietNow() ? (pending ? msUntilQuietEnds() + 5000 : 0)
+    : outbox.some(o => o.state === 'porEnviar') ? RETRY_SEND_MS
     : outbox.some(o => o.state === 'enviado') ? POLL_RESULT_MS : 0;
   if (waiting)
-    scheduleSync.t = setTimeout(() => { if (document.visibilityState === 'visible') flushOutbox(); else scheduleSync(); }, waiting);
+    scheduleSync.t = setTimeout(() => {
+      if (document.visibilityState !== 'visible') return scheduleSync();
+      flushOutbox(); refreshPacks();
+    }, waiting);
 }
 window.addEventListener('online', () => { flushOutbox(); refreshPacks(); });
 // De volta à aplicação (estava noutra, ou com o ecrã desligado): o que está
 // na fila segue, e o pacote vem outra vez do EGF Lab -- é a altura em que o
-// operador olha para ele.
+// operador olha para ele. Nada disto corre no silêncio.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') { flushOutbox(); refreshPacks(); }
+  if (document.visibilityState === 'visible') { flushOutbox(); refreshPacks(); renderOutbox(); }
 });
 const STATE_TEXT = {
   porEnviar: ['Por enviar', 'wait'], enviado: ['Enviado — à espera do EGF Lab', 'wait'],
@@ -1383,7 +1426,10 @@ function renderOutbox(){
   }
   outbox.filter(o => o.inst === instId() && !EVENT_KINDS.includes(o.kind)).slice(-6).reverse().forEach(o => {
     const li = document.createElement('li'), head = document.createElement('div'), st = document.createElement('span');
-    const [text, cls] = STATE_TEXT[o.state] || [o.state, 'wait'];
+    let [text, cls] = STATE_TEXT[o.state] || [o.state, 'wait'];
+    // No silêncio, dizer quando é que as coisas andam.
+    if (quietNow() && o.state === 'enviado') text = `Enviado — o EGF Lab recolhe a partir das ${quietEnd()}`;
+    if (quietNow() && o.state === 'porEnviar') text = `Por enviar — carregue em Enviar, ou segue a partir das ${quietEnd()}`;
     head.textContent = `${o.kind === 'leituras' ? 'Leituras de ' + dateFmt(o.date) : 'Posições'} · ${o.n} · `;
     st.className = 'st ' + cls; st.textContent = text; head.append(st);
     li.append(head);
@@ -1412,8 +1458,10 @@ function renderOutbox(){
   await takeLinkFromAddress();
   // Os telemóveis ligados antes de haver o aviso de ligação avisam agora.
   await ensureRegistered();
-  // Por trás: o que ficou na fila segue, e os pacotes das ligações atualizam-se.
+  // Por trás, fora do silêncio: o que ficou na fila segue, e os pacotes das
+  // ligações atualizam-se. No silêncio fica tudo para quando ele acabar.
   flushOutbox().then(refreshPacks);
+  renderOutbox();
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || ['localhost','127.0.0.1'].includes(location.hostname)))
     navigator.serviceWorker.register('sw.js').catch(() => {});
 })();
