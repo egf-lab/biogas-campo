@@ -10,7 +10,7 @@ na conta de armazenamento do Azure, que o telemóvel alcança pela internet:
     EGF Lab ── pacote.json ──▶ caixa do aterro ◀── envios (Enviar) ── telemóvel
             ◀── recolha (cron, 10 em 10 min) ──┘ ── resultado/<id>.json ──▶
 
-O telemóvel liga-se ao aterro pelo código QR de Biogás › Envios do campo
+O telemóvel liga-se ao aterro pelo código QR de Biogás › Aplicação de campo
 (`#ligar=...` no endereço, ou Colar ligação). O lado do EGF Lab está em
 `biogas_field_dropbox.py` (a caixa e as ligações) e `biogas_field_inbox.py`
 (o que se faz a cada envio); a recolha é `collect_field_submissions.py`. Só
@@ -19,7 +19,7 @@ funciona com `FIELD_DROPBOX_ENABLED=1` no servidor.
 **Ficheiros.** Continua a dar, com ou sem ligação:
 
     EGF Lab ── pacote de campo (.json) ──▶ telemóvel ── Excel de leituras ──▶ EGF Lab
-    Biogás › Poços / Mapa                                    Biogás › Importar leituras
+    Biogás › Aplicação de campo                              Biogás › Importar leituras
 
 ## Aterro sem poços
 
@@ -46,7 +46,7 @@ variables › Actions):
   escrita, posta só no repositório de destino.
 
 E no EGF Lab, `FIELD_APP_URL` (config.py ou `.env`) com o endereço público:
-é o que aparece, com o código QR, no "Pacote de campo".
+é o endereço por trás dos códigos QR da página Biogás › Aplicação de campo.
 
 Depois de mudar `index.html` não é preciso mais nada: os telemóveis apanham a
 versão nova na abertura a seguir. Ao mudar bibliotecas, ícones ou o próprio
@@ -75,7 +75,17 @@ abrir `http://localhost:8000` (o service worker funciona em localhost).
   (`SUBMISSION_FORMAT` em `index.html`, lido por `biogas_field_inbox.py`;
   `tests/test_biogas_field_inbox.py` confirma que batem). Leva o identificador
   do envio, o aterro, o operador, a data da campanha, as leituras e as
-  posições (nas leituras, só as dos poços novos).
+  posições (nas leituras, só as dos poços novos), e o telemóvel (`device`)
+  e o código com que está ligado (`policy`). Os avisos `ligacao` e
+  `desligacao` não levam dados: só alimentam a lista de telemóveis de cada
+  aterro (Administração › Aplicação de campo).
+
+O EGF Lab é a fonte da verdade. Uma posição gravada no telemóvel só conta
+enquanto o EGF Lab não a tem: depois de um envio importado que a levou, ou
+quando o pacote já traz o poço no mesmo sítio, fica como registo e vale o
+pacote. O pacote é publicado de novo a cada alteração no EGF Lab
+(`biogas_field_publish.py`), e a aplicação vai buscá-lo ao abrir e ao voltar
+ao primeiro plano.
 
 No iPhone, a aplicação no ecrã principal não partilha o armazenamento com o
 Safari: se o código QR abrir no Safari, a ligação fica lá. Na aplicação do

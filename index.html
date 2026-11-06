@@ -19,7 +19,7 @@
   tem dados móveis mas nunca chega à rede da empresa. Dois caminhos:
 
     Envio direto -- o escritório dá ao operador o código QR do aterro (EGF Lab
-                 › Envios do campo). A ligação (#ligar=...) aponta para a
+                 › Biogás › Aplicação de campo). A ligação (#ligar=...) aponta para a
                  caixa desse aterro no Azure: a aplicação lê lá o pacote, e o
                  botão Enviar deixa lá cada campanha, que o EGF Lab importa
                  sozinho (biogas_field_inbox.py). Sem rede, o envio fica na
@@ -156,10 +156,10 @@ ul.list li:first-child{border-top:0}
 <section class="card setup" id="setup" hidden>
   <h2>Comece por ligar um aterro</h2>
   <p>Leia com a câmara do telemóvel o <b>código QR do aterro</b> que o escritório lhe deu
-     (EGF Lab › Envios do campo). A aplicação abre já com esse aterro, e as leituras seguem
-     para o EGF Lab com o botão <b>Enviar</b>. Se lhe mandaram a ligação por escrito, use Colar ligação.</p>
-  <p>Ou carregue o <b>pacote de campo</b> (um ficheiro <b>.json</b> do EGF Lab, em Biogás › Poços
-     ou no Mapa) e envie as leituras em Excel. Só é preciso uma vez por aterro.</p>
+     (EGF Lab › Biogás › Aplicação de campo). A aplicação abre já com esse aterro, e as leituras
+     seguem para o EGF Lab com o botão <b>Enviar</b>. Se lhe mandaram a ligação por escrito, use Colar ligação.</p>
+  <p>Ou carregue o <b>pacote de campo</b> (um ficheiro <b>.json</b> da mesma página do EGF Lab)
+     e envie as leituras em Excel. Só é preciso uma vez por aterro.</p>
   <div class="exportrow">
     <button class="btn primary" data-paste>Colar ligação</button>
     <button class="btn" data-load>Carregar pacote</button>
@@ -275,7 +275,7 @@ ul.list li:first-child{border-top:0}
 <script src="vendor/xlsx.full.min.js"></script>
 <script>
 'use strict';
-const APP_VERSION = '2026-11-06';
+const APP_VERSION = '2026-11-06.3';
 // Cabeçalho do Excel de leituras. A importação de leituras do EGF Lab reconhece
 // estes nomes sem mapear colunas (formato longo); o teste
 // tests/test_field_app_export.py lê esta linha e confirma-o.
@@ -294,6 +294,8 @@ const PACK_VERSION = 1;
 // tests/test_biogas_field_inbox.py confirma que é o mesmo).
 const SUBMISSION_FORMAT = 'egflab-biogas-envio';
 const SUBMISSION_VERSION = 1;
+// Avisos sem dados, para a lista de telemóveis de cada aterro no EGF Lab.
+const EVENT_KINDS = ['ligacao', 'desligacao'];
 // Mais longe do que isto do aterro ao enviar: pergunta-se se é o aterro certo.
 const FAR_FROM_SITE_M = 2000;
 // De quanto em quanto tempo, com a aplicação aberta, se tenta outra vez: um
@@ -400,13 +402,26 @@ $('followBtn').onclick = () => { follow = !follow; $('followBtn').setAttribute('
 $('wellsBtn').onclick = () => { wellsOn = !wellsOn; $('wellsBtn').setAttribute('aria-pressed', wellsOn); wellsOn ? wellLayer.addTo(map) : map.removeLayer(wellLayer); };
 $('pickBtn').onclick = () => setPick(!picking);
 
+// O EGF Lab é a fonte da verdade. Uma posição gravada aqui só conta enquanto
+// o EGF Lab ainda não a tem: depois de aceite (o resultado de um envio que a
+// levou), ou quando o pacote já traz o poço no mesmo sítio, fica só como
+// registo da ronda, e o que vale é o pacote. É assim que um poço apagado no
+// escritório desaparece do telemóvel, em vez de voltar no envio seguinte, e
+// que uma coordenada corrigida no escritório passa a ser a do mapa.
+// O que ainda não chegou, ou foi retido, continua a ser do telemóvel.
+const SAME_PLACE_M = 2;
+function phoneOwns(p){
+  if (!p || p.acceptedAt) return false;
+  const w = packByKey[codeKey(p.code)];
+  return !(w && typeof w.lat === 'number' && dist(w.lat, w.lon, p.lat, p.lon) <= SAME_PLACE_M);
+}
 // Os poços que se conhecem: os do pacote e os novos, que só existem nas
 // Posições gravadas neste telemóvel. Um aterro novo começa sem nenhum do
 // pacote, e é assim que os poços nascem: gravados aqui, criados no EGF Lab
-// quando o escritório importar o Excel das posições.
+// com o envio (ou quando o escritório importar o Excel das posições).
 function mergeWells(){
   const extra = Object.values(positions)
-    .filter(p => !packByKey[codeKey(p.code)])
+    .filter(p => phoneOwns(p) && !packByKey[codeKey(p.code)])
     .map(p => ({code: String(p.code), type: p.tipo || null, lat: p.lat, lon: p.lon, isNew: true}));
   wells = packWells.concat(extra).sort((a, b) => natCmp(a.code, b.code));
   wellByKey = {}; wells.forEach(w => wellByKey[codeKey(w.code)] = w);
@@ -424,8 +439,9 @@ function buildWellLayer(){
       .addTo(wellLayer);
   });
 }
-// Onde está o poço, o melhor que se sabe: a posição gravada aqui ganha à do pacote.
-function bestPos(w){ const p = positions[w.code]; return p ? [p.lat, p.lon] : (typeof w.lat === 'number' ? [w.lat, w.lon] : null); }
+// Onde está o poço: a posição gravada aqui enquanto o EGF Lab não a tiver,
+// e depois a do pacote.
+function bestPos(w){ const p = positions[w.code]; return phoneOwns(p) ? [p.lat, p.lon] : (typeof w.lat === 'number' ? [w.lat, w.lon] : null); }
 function styleWells(){
   const done = campaigns[campDate] || {}, cur = curCode();
   wells.forEach(w => {
@@ -830,7 +846,8 @@ function render(){
       meta.append(sub);
       lid.onclick = () => { idEl.value = code; onIdChange(); window.scrollTo({top: $('wid').getBoundingClientRect().top + window.scrollY - 80, behavior:'smooth'}); };
     } else {
-      b.textContent = (r.acc != null ? '±' + Math.round(r.acc) + ' m' : r.src === 'Map' ? 'pelo mapa' : 'manual') + ' · ' + t + (r.note ? ' · ' + r.note : '');
+      b.textContent = (r.acc != null ? '±' + Math.round(r.acc) + ' m' : r.src === 'Map' ? 'pelo mapa' : 'manual') + ' · ' + t + (r.note ? ' · ' + r.note : '')
+        + (phoneOwns(r) ? '' : ' · no EGF Lab');
       sub.textContent = r.lat.toFixed(6) + ', ' + r.lon.toFixed(6);
       meta.append(b, document.createElement('br'), sub);
       lid.onclick = () => { follow = false; $('followBtn').setAttribute('aria-pressed','false'); map.setView([r.lat, r.lon], 20); window.scrollTo({top:0, behavior:'smooth'}); };
@@ -869,7 +886,9 @@ function render(){
   renderOutbox();
 
   recLayer.clearLayers();
-  if (mode === 'posicoes') Object.values(positions).forEach(r => L.circleMarker([r.lat, r.lon], {radius:7, weight:2, color:'#000', fillColor:'#f39200', fillOpacity:1})
+  // A laranja, só as posições que o EGF Lab ainda não tem; as outras já são
+  // os pontos cinzentos do pacote.
+  if (mode === 'posicoes') Object.values(positions).filter(phoneOwns).forEach(r => L.circleMarker([r.lat, r.lon], {radius:7, weight:2, color:'#000', fillColor:'#f39200', fillOpacity:1})
     .bindTooltip(String(r.code), {permanent:true, direction:'right', offset:[6,0], className:'lbl-rec'}).addTo(recLayer));
   styleWells();
 }
@@ -896,7 +915,9 @@ function readingRows(){
   ]; });
 }
 function positionRows(){
-  const rows = Object.keys(positions).sort(natCmp).map(code => {
+  // Só o que o EGF Lab ainda não tem: um poço que já lá está, ou que o
+  // escritório apagou, não volta por um Excel.
+  const rows = Object.keys(positions).filter(code => phoneOwns(positions[code])).sort(natCmp).map(code => {
     // As coordenadas "antigas" só do pacote: num poço novo não há antigas.
     const r = positions[code], pw = packByKey[codeKey(code)], [x, y] = tm06(r.lat, r.lon);
     const old = pw && typeof pw.lat === 'number';
@@ -1034,9 +1055,14 @@ $('removeInst').onclick = async () => {
   if (!confirm(`Remover ${name} deste telemóvel?`
     + (nr || np ? `\n\nApaga também ${nr} leituras e ${np} posições guardadas aqui. Envie ou exporte primeiro o que ainda não chegou ao EGF Lab.` : '')
     + (queued ? `\n\nAtenção: ${queued} ${queued === 1 ? 'envio ainda não seguiu' : 'envios ainda não seguiram'} (sem rede) e ${queued === 1 ? 'perde-se' : 'perdem-se'}.` : ''))) return;
+  // O EGF Lab fica a saber que este telemóvel se desligou do aterro. O aviso
+  // leva a ligação consigo: segue mesmo depois de ela sair daqui.
+  if (links[id]) await queueEvent(id, 'desligacao', links[id]);
   delete packs[id]; delete links[id];
-  outbox = outbox.filter(o => o.inst !== id);
+  if (prefs.reg) { delete prefs.reg[id]; savePrefs(); }
+  outbox = outbox.filter(o => o.inst !== id || o.kind === 'desligacao');
   await store.set('packs', packs); await store.set('links', links); await saveOutbox();
+  flushOutbox();
   await store.del('pos:' + id); await store.del('read:' + id);
   const ids = Object.keys(packs);
   if (ids.length) await selectInst(ids[0]); else showSetup();
@@ -1091,9 +1117,13 @@ async function useLink(d){
   if (d === 'bad') { alert('Esta ligação não é válida. Peça ao escritório o código do aterro outra vez.'); return null; }
   const id = String(d.i), name = d.n || ('aterro ' + id), known = links[id];
   // A confirmação é a garantia de que o telemóvel fica no aterro certo.
-  if (!(known && known.s === d.s) && !confirm(`Ligar este telemóvel ao aterro ${name}?\n\nO que enviar daqui entra no EGF Lab deste aterro.`)) return null;
+  const fresh = !(known && known.s === d.s);
+  if (fresh && !confirm(`Ligar este telemóvel ao aterro ${name}?\n\nO que enviar daqui entra no EGF Lab deste aterro.`)) return null;
   links[id] = {u: d.u.replace(/\/+$/, ''), s: d.s.replace(/^\?/, ''), n: name, at: new Date().toISOString()};
   await store.set('links', links);
+  // O nome logo aqui, para o EGF Lab saber de quem é o telemóvel que se ligou.
+  if (fresh) askOperator();
+  await ensureRegistered();
   if (await refreshPack(id)) { await selectInst(id); toast(`${name}: ligado ao EGF Lab`); }
   else if (packs[id]) { await selectInst(id); toast(`${name}: ligado. O pacote atualiza quando houver rede.`); }
   else toast(`Ligação a ${name} guardada. O aterro carrega quando houver rede.`);
@@ -1123,17 +1153,30 @@ async function refreshPack(id){
   let p;
   try {
     const r = await fetch(linkUrl(l, 'pacote.json'), {cache: 'no-store'});
-    if (r.status === 403) { l.refused = true; await store.set('links', links); return false; }
+    if (r.status === 403) {
+      // Código revogado: diz-se já, no aterro aberto, e não só no próximo envio.
+      l.refused = true; await store.set('links', links);
+      if (inst && instId() === id) renderOutbox();
+      return false;
+    }
     if (!r.ok) return false;
     p = await r.json();
   } catch (e) { return false; }
   if (p && p.format === PACK_FORMAT && p.version > PACK_VERSION) { toast('Pacote de uma versão mais recente — atualize a aplicação'); return false; }
   if (!validPack(p) || String(p.installation.id) !== id) return false;
-  if (l.refused) { delete l.refused; await store.set('links', links); }
+  if (l.refused) {
+    delete l.refused; await store.set('links', links);
+    if (inst && instId() === id) renderOutbox();
+  }
   const changed = !packs[id] || packs[id].generatedAt !== p.generatedAt;
   packs[id] = p; await store.set('packs', packs);
-  // O aterro aberto atualiza-se onde está, sem mudar de poço nem de campanha.
-  if (changed && inst && instId() === id) { usePack(p); mergeWells(); buildStatusChips(); showPackInfo(); onIdChange(); render(); }
+  // O aterro aberto atualiza-se onde está, sem mudar de poço nem de campanha
+  // -- e sem tocar no formulário: a rede pode voltar a meio de uma leitura, e
+  // o que o operador está a escrever ainda não foi gravado.
+  if (changed && inst && instId() === id) {
+    usePack(p); mergeWells(); buildStatusChips(); setStatus(status); showPackInfo();
+    updateInfo(); updateButtons(); render();
+  }
   return true;
 }
 async function refreshPacks(){ for (const id of Object.keys(links)) await refreshPack(id); }
@@ -1147,15 +1190,74 @@ function askOperator(force){
   if (n) { prefs.operator = n.slice(0, 100); savePrefs(); }
   return prefs.operator || '';
 }
+// Este telemóvel, para a lista de telemóveis de cada aterro no EGF Lab: um
+// identificador dado ao primeiro uso, e o que é (sistema e navegador). Não é
+// uma credencial -- o código do aterro é um só para todos os telemóveis.
+function deviceId(){ if (!prefs.deviceId) { prefs.deviceId = newId(); savePrefs(); } return prefs.deviceId; }
+function deviceLabel(){
+  const ua = navigator.userAgent, android = /Android (\d+)/.exec(ua), ios = /OS (\d+)_\d/.exec(ua);
+  const os = android ? 'Android ' + android[1]
+    : /iPhone|iPad|iPod/.test(ua) ? 'iPhone' + (ios ? ' · iOS ' + ios[1] : '')
+    : /Windows/.test(ua) ? 'Windows' : /Mac OS X/.test(ua) ? 'Mac' : 'Outro';
+  const browser = /SamsungBrowser/.test(ua) ? 'Samsung Internet' : /EdgA?\//.test(ua) ? 'Edge'
+    : /Firefox|FxiOS/.test(ua) ? 'Firefox' : /CriOS|Chrome/.test(ua) ? 'Chrome' : /Safari/.test(ua) ? 'Safari' : '';
+  const installed = navigator.standalone || matchMedia('(display-mode: standalone)').matches;
+  return [os, browser, installed ? 'instalada' : ''].filter(Boolean).join(' · ').slice(0, 100);
+}
+// O código com que o telemóvel está ligado (a política, "campo-2"). Depois de
+// um código revogado, o EGF Lab vê quem ainda não leu o novo.
+const policyOf = l => ((/(?:^|&)si=([^&]+)/.exec((l && l.s) || '') || [])[1] || '').slice(0, 20) || null;
+const devicePart = l => ({device: {id: deviceId(), label: deviceLabel()}, policy: policyOf(l)});
+// Avisos sem dados: ligou-se (leu o código) e desligou-se (removeu o aterro).
+async function queueEvent(id, kind, via){
+  const l = via || links[id]; if (!l) return;
+  const uid = newId();
+  const body = JSON.stringify({format: SUBMISSION_FORMAT, version: SUBMISSION_VERSION, id: uid, kind,
+    installation: {id: Number(id), name: l.n || ''}, operator: prefs.operator || null, appVersion: APP_VERSION,
+    createdAt: new Date().toISOString(), ...devicePart(l)});
+  outbox.push({id: uid, inst: id, kind, n: 0, createdAt: new Date().toISOString(), state: 'porEnviar',
+    body, tries: 0, lastError: '', via: {u: l.u, s: l.s, n: l.n}});
+  await saveOutbox();
+}
+// Cada ligação avisa uma vez por código: ao ler um código novo, e nos
+// telemóveis que já estavam ligados antes de haver este aviso.
+async function ensureRegistered(){
+  prefs.reg = prefs.reg || {};
+  for (const [id, l] of Object.entries(links)) {
+    const policy = policyOf(l) || l.s;
+    if (prefs.reg[id] === policy) continue;
+    await queueEvent(id, 'ligacao');
+    prefs.reg[id] = policy;
+  }
+  savePrefs();
+}
+// O resultado de um envio que o EGF Lab aceitou: as posições que ele levou
+// passam a ser do EGF Lab. Só as que não mudaram desde então -- uma posição
+// gravada outra vez depois de enviada continua a ser do telemóvel.
+async function markAccepted(o){
+  if (!o.posKeys || !o.posKeys.length) return false;
+  const when = (o.result && o.result.processedAt) || new Date().toISOString();
+  const current = inst && instId() === o.inst;
+  const pos = current ? positions : ((await store.get('pos:' + o.inst)) || {});
+  let n = 0;
+  o.posKeys.forEach(([code, savedAt]) => {
+    const p = pos[code];
+    if (p && p.savedAt === savedAt && !p.acceptedAt) { p.acceptedAt = when; n++; }
+  });
+  if (!n) return false;
+  if (current) await persist('pos'); else await store.set('pos:' + o.inst, pos);
+  return current;
+}
 $('sendBtn').onclick = async () => {
   const id = instId(), l = links[id]; if (!l) return;
   const isRead = mode === 'leituras', kind = isRead ? 'leituras' : 'posicoes';
   const readings = isRead ? Object.values(campaigns[campDate] || {}) : [];
-  // Nas leituras vão também as posições dos poços novos: sem elas o EGF Lab
-  // não os pode criar, e as leituras deles ficavam sem destino.
-  const pos = Object.values(positions).filter(p => !isRead || !packByKey[codeKey(p.code)]);
+  // Só as posições que o EGF Lab ainda não tem. Nas leituras, só as dos poços
+  // novos: sem elas o EGF Lab não os pode criar, e as leituras deles ficavam
+  // sem destino.
+  const pos = Object.values(positions).filter(p => phoneOwns(p) && (!isRead || !packByKey[codeKey(p.code)]));
   if (isRead && !readings.length) return toast('Ainda nada lido nesta campanha');
-  if (!isRead && !pos.length) return toast('Ainda nenhuma posição gravada');
+  if (!isRead && !pos.length) return toast(Object.keys(positions).length ? 'O EGF Lab já tem todas estas posições' : 'Ainda nenhuma posição gravada');
   if (!askOperator()) return;
   const site = siteCenter();
   if (fix && site) {
@@ -1177,9 +1279,13 @@ $('sendBtn').onclick = async () => {
       suction: r.suction, valve: r.valve, status: r.status, note: r.note || null, lat: r.lat, lon: r.lon, acc: r.acc, savedAt: r.savedAt})),
     positions: pos.map(p => ({code: p.code, tipo: p.tipo || null, lat: p.lat, lon: p.lon, acc: p.acc, alt: p.alt,
       n: p.n, src: p.src, note: p.note || null, savedAt: p.savedAt})),
+    ...devicePart(l),
   });
   outbox.push({id: uid, inst: id, kind, date: isRead ? campDate : null, n, createdAt: new Date().toISOString(),
-    state: 'porEnviar', body, tries: 0, lastError: ''});
+    state: 'porEnviar', body, tries: 0, lastError: '',
+    // Que posições foram, e de quando: é com isto que, aceite o envio, elas
+    // passam a ser do EGF Lab.
+    posKeys: pos.map(p => [p.code, p.savedAt])});
   await saveOutbox(); renderOutbox();
   if (navigator.vibrate) navigator.vibrate(60);
   await flushOutbox();
@@ -1197,9 +1303,12 @@ async function flushOutbox(){
   if (flushing || !outbox.length) return;
   flushing = true;
   const imported = new Set();
+  let accepted = false;
   try {
     for (const o of outbox.filter(o => o.state === 'porEnviar')) {
-      const l = links[o.inst];
+      // A ligação de agora (o código pode ter sido trocado entretanto); um
+      // aviso de que se desligou leva a sua, porque a do aterro já cá não está.
+      const l = links[o.inst] || o.via;
       if (!l) { o.lastError = 'Este telemóvel já não está ligado a este aterro.'; continue; }
       let st = 0;
       try {
@@ -1209,7 +1318,11 @@ async function flushOutbox(){
       // 201: chegou. Um envio que já lá está (uma tentativa anterior chegou,
       // mas a resposta perdeu-se) é recusado; vê-se se está lá e conta como enviado.
       if (st === 201 || ((st === 409 || st === 403) && await blobExists(l, o.id))) {
-        o.state = 'enviado'; o.sentAt = new Date().toISOString(); o.lastError = ''; delete o.body;
+        // Um aviso não tem resultado para esperar: chegou, acabou.
+        o.state = EVENT_KINDS.includes(o.kind) ? 'feito' : 'enviado';
+        o.sentAt = new Date().toISOString(); o.lastError = ''; delete o.body;
+      } else if (EVENT_KINDS.includes(o.kind) && st === 403) {
+        o.state = 'feito';   // código revogado: o aviso já não tem para onde ir
       } else {
         o.tries++;
         o.lastError = st === 403 ? 'O EGF Lab recusou a ligação deste aterro (foi trocada?). Peça o código novo ao escritório.' : `O EGF Lab respondeu ${st}; tenta outra vez sozinho.`;
@@ -1222,12 +1335,17 @@ async function flushOutbox(){
         if (!r.ok) continue;
         o.result = await r.json(); o.state = o.result.status || 'importado';
         if (o.result.readingsCreated || o.result.readingsReplaced || o.result.wellsCreated) imported.add(o.inst);
+        // Importado (com ou sem avisos): o que levou passa a ser do EGF Lab.
+        // Retido ou recusado: continua a ser do telemóvel.
+        if (['importado', 'com_avisos'].includes(o.state) && await markAccepted(o)) accepted = true;
       } catch (e) {}
     }
-    // Fica a história recente de cada aterro; o resto vai-se.
+    // Fica a história recente de cada aterro; o resto vai-se, e os avisos
+    // que já seguiram também.
     const keep = new Set();
-    Object.keys(links).concat(Object.keys(packs)).forEach(id => outbox.filter(o => o.inst === id).slice(-30).forEach(o => keep.add(o)));
+    Object.keys(links).concat(Object.keys(packs)).forEach(id => outbox.filter(o => o.inst === id && !EVENT_KINDS.includes(o.kind)).slice(-30).forEach(o => keep.add(o)));
     outbox = outbox.filter(o => keep.has(o) || o.state === 'porEnviar' || o.state === 'enviado');
+    if (accepted) { mergeWells(); updateInfo(); render(); }
   } finally {
     flushing = false;
     await saveOutbox(); renderOutbox(); scheduleSync();
@@ -1243,7 +1361,12 @@ function scheduleSync(){
     scheduleSync.t = setTimeout(() => { if (document.visibilityState === 'visible') flushOutbox(); else scheduleSync(); }, waiting);
 }
 window.addEventListener('online', () => { flushOutbox(); refreshPacks(); });
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') flushOutbox(); });
+// De volta à aplicação (estava noutra, ou com o ecrã desligado): o que está
+// na fila segue, e o pacote vem outra vez do EGF Lab -- é a altura em que o
+// operador olha para ele.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') { flushOutbox(); refreshPacks(); }
+});
 const STATE_TEXT = {
   porEnviar: ['Por enviar', 'wait'], enviado: ['Enviado — à espera do EGF Lab', 'wait'],
   importado: ['Importado no EGF Lab', 'good'], com_avisos: ['Importado, com avisos para o escritório', 'warn'],
@@ -1258,7 +1381,7 @@ function renderOutbox(){
     li.textContent = 'A ligação a este aterro foi recusada (o escritório trocou-a?). Peça o código novo.';
     ul.appendChild(li);
   }
-  outbox.filter(o => o.inst === instId()).slice(-6).reverse().forEach(o => {
+  outbox.filter(o => o.inst === instId() && !EVENT_KINDS.includes(o.kind)).slice(-6).reverse().forEach(o => {
     const li = document.createElement('li'), head = document.createElement('div'), st = document.createElement('span');
     const [text, cls] = STATE_TEXT[o.state] || [o.state, 'wait'];
     head.textContent = `${o.kind === 'leituras' ? 'Leituras de ' + dateFmt(o.date) : 'Posições'} · ${o.n} · `;
@@ -1287,6 +1410,8 @@ function renderOutbox(){
   else { await selectInst(packs[prefs.instId] ? prefs.instId : ids[0]); await maybeMigrateLegacy(); }
   // Aberta pelo código QR de um aterro: liga-o (e abre-o).
   await takeLinkFromAddress();
+  // Os telemóveis ligados antes de haver o aviso de ligação avisam agora.
+  await ensureRegistered();
   // Por trás: o que ficou na fila segue, e os pacotes das ligações atualizam-se.
   flushOutbox().then(refreshPacks);
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || ['localhost','127.0.0.1'].includes(location.hostname)))
