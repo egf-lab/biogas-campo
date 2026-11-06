@@ -2,7 +2,21 @@
 
 Página estática para o telemóvel do operador: posições dos poços e leituras
 (CH₄, CO₂, O₂, H₂S, estado, nota) sem rede. Não fala com o EGF Lab — o
-telemóvel nunca chega à rede da empresa. Os dados andam em ficheiros:
+telemóvel nunca chega à rede da empresa. Há dois caminhos.
+
+**Envio direto.** O encontro é numa caixa por aterro (contentor `campo-<id>`)
+na conta de armazenamento do Azure, que o telemóvel alcança pela internet:
+
+    EGF Lab ── pacote.json ──▶ caixa do aterro ◀── envios (Enviar) ── telemóvel
+            ◀── recolha (cron, 10 em 10 min) ──┘ ── resultado/<id>.json ──▶
+
+O telemóvel liga-se ao aterro pelo código QR de Biogás › Envios do campo
+(`#ligar=...` no endereço, ou Colar ligação). O lado do EGF Lab está em
+`biogas_field_dropbox.py` (a caixa e as ligações) e `biogas_field_inbox.py`
+(o que se faz a cada envio); a recolha é `collect_field_submissions.py`. Só
+funciona com `FIELD_DROPBOX_ENABLED=1` no servidor.
+
+**Ficheiros.** Continua a dar, com ou sem ligação:
 
     EGF Lab ── pacote de campo (.json) ──▶ telemóvel ── Excel de leituras ──▶ EGF Lab
     Biogás › Poços / Mapa                                    Biogás › Importar leituras
@@ -57,3 +71,12 @@ abrir `http://localhost:8000` (o service worker funciona em localhost).
   deste ficheiro e falha se a importação deixar de o reconhecer.
 - **Excel de posições** — entra em Biogás › Poços › Importar poços, com
   "actualizar existentes".
+- **Envio** — `format: "egflab-biogas-envio"`, `version: 1`
+  (`SUBMISSION_FORMAT` em `index.html`, lido por `biogas_field_inbox.py`;
+  `tests/test_biogas_field_inbox.py` confirma que batem). Leva o identificador
+  do envio, o aterro, o operador, a data da campanha, as leituras e as
+  posições (nas leituras, só as dos poços novos).
+
+No iPhone, a aplicação no ecrã principal não partilha o armazenamento com o
+Safari: se o código QR abrir no Safari, a ligação fica lá. Na aplicação do
+ecrã principal use **Colar ligação** com a ligação que o escritório copiou.
